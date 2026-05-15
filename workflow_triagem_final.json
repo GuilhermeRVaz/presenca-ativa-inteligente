@@ -1,0 +1,252 @@
+{
+  "name": "Agente Triador - PAI (Produção)",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "triagem",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "webhook-inbound",
+      "name": "Webhook Inbound",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [
+        0,
+        240
+      ],
+      "webhookId": "18a2a1e7-1801-4ae6-ba11-1812d05e57ae"
+    },
+    {
+      "parameters": {
+        "text": "={{ $json.body.message_text }}",
+        "attributes": {
+          "attributes": [
+            {
+              "name": "reason",
+              "type": "string",
+              "description": "Motivo da falta (ILLNESS, WORK, TRAVEL, FAMILY, SCHOOL_ISSUE, OTHER)",
+              "required": true
+            },
+            {
+              "name": "student_name",
+              "type": "string",
+              "description": "Nome do aluno mencionado na mensagem",
+              "required": false
+            },
+            {
+              "name": "ai_confidence",
+              "type": "number",
+              "description": "Confiança na extração (0 a 1)",
+              "required": true
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "extractor-ia",
+      "name": "Extrair Dados com IA",
+      "type": "@n8n/n8n-nodes-langchain.informationExtractor",
+      "typeVersion": 1.2,
+      "position": [
+        220,
+        240
+      ]
+    },
+    {
+      "parameters": {
+        "model": "gpt-4o-mini",
+        "options": {}
+      },
+      "id": "openai-model",
+      "name": "OpenAI GPT-4o-mini",
+      "type": "@n8n/n8n-nodes-langchain.lmChatOpenAi",
+      "typeVersion": 1.3,
+      "position": [
+        180,
+        460
+      ]
+    },
+    {
+      "parameters": {
+        "url": "http://host.docker.internal:8000/students/search",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "name",
+              "value": "={{ $json.output?.student_name || '__NO_STUDENT_NAME__' }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "supabase-search",
+      "name": "Backend: Buscar Aluno",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        500,
+        240
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": false,
+            "leftValue": "",
+            "type": "string"
+          },
+          "conditions": [
+            {
+              "id": "f860d5b1-6a2c-4b6e-8e8e-ecdf6e4a410f",
+              "leftValue": "={{ $json.id || '' }}",
+              "rightValue": "",
+              "operator": "notEmpty"
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "check-found",
+      "name": "Encontrou Aluno?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        720,
+        240
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://host.docker.internal:8000/inbound/reply",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ { school_id: $(\"Webhook Inbound\").item.json.body.school_id, sender_jid: $(\"Webhook Inbound\").item.json.body.sender_jid, raw_message_id: $(\"Webhook Inbound\").item.json.body.raw_message_id, body: $(\"Webhook Inbound\").item.json.body.message_text, reason: $(\"Extrair Dados com IA\").item.json.output.reason, ai_confidence: $(\"Extrair Dados com IA\").item.json.output.ai_confidence, student_id: $json.id, guardian_id: $json.student_guardians?.[0]?.guardian_id, received_at: $(\"Webhook Inbound\").item.json.body.received_at } }}",
+        "options": {}
+      },
+      "id": "backend-update",
+      "name": "Backend: Atualizar Triagem",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        940,
+        140
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "{\"status\": \"success\", \"message\": \"Triagem concluída com identificação.\"}",
+        "options": {}
+      },
+      "id": "respond-success",
+      "name": "Finalizar: Sucesso",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.5,
+      "position": [
+        1160,
+        140
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "{\"status\": \"failed\", \"message\": \"Aluno não identificado na base.\"}",
+        "options": {}
+      },
+      "id": "respond-unknown",
+      "name": "Finalizar: Desconhecido",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.5,
+      "position": [
+        1160,
+        340
+      ]
+    }
+  ],
+  "connections": {
+    "Webhook Inbound": {
+      "main": [
+        [
+          {
+            "node": "Extrair Dados com IA",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extrair Dados com IA": {
+      "main": [
+        [
+          {
+            "node": "Backend: Buscar Aluno",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "OpenAI GPT-4o-mini": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "Extrair Dados com IA",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Backend: Buscar Aluno": {
+      "main": [
+        [
+          {
+            "node": "Encontrou Aluno?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Encontrou Aluno?": {
+      "main": [
+        [
+          {
+            "node": "Backend: Atualizar Triagem",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Finalizar: Desconhecido",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Backend: Atualizar Triagem": {
+      "main": [
+        [
+          {
+            "node": "Finalizar: Sucesso",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "versionId": "f860d5b1-6a2c-4b6e-8e8e-ecdf6e4a410f"
+}

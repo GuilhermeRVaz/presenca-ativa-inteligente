@@ -1,0 +1,57 @@
+services:
+  db:
+    image: postgres:15-alpine
+    container_name: busca-ativa-db
+    restart: always
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      POSTGRES_DB: ${POSTGRES_DB:-busca_ativa_local}
+    ports:
+      - "5433:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+  n8n:
+    image: docker.n8n.io/n8nio/n8n
+    container_name: busca-ativa-n8n
+    restart: always
+    ports:
+      - "5678:5678"
+    environment:
+      - N8N_BLOCK_ENV_ACCESS_IN_NODE=false
+      - DB_TYPE=postgresdb
+      - DB_POSTGRESDB_HOST=db
+      - DB_POSTGRESDB_PORT=5432
+      - DB_POSTGRESDB_DATABASE=${POSTGRES_DB:-busca_ativa_local}
+      - DB_POSTGRESDB_USER=${POSTGRES_USER:-postgres}
+      - DB_POSTGRESDB_PASSWORD=${POSTGRES_PASSWORD:-postgres}
+    depends_on:
+      - db
+
+  api:
+    build: .
+    container_name: busca-ativa-api
+    restart: always
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    depends_on:
+      - db
+
+  painel:
+    build: .
+    container_name: busca-ativa-painel
+    restart: always
+    command: streamlit run painel.py --server.address 0.0.0.0 --server.port 8501
+    ports:
+      - "8501:8501"
+    env_file:
+      - .env
+    depends_on:
+      - api
+
+volumes:
+  postgres_data:

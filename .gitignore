@@ -1,0 +1,51 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.so
+.venv/
+venv/
+env/
+ENV/
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Ambiente
+.env
+.env.local
+.env.*.local
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Testes e Debug (se não quiser versionar)
+# tests/  # descomente se quiser ignorar todos os testes
+
+# Relatórios e outputs temporários
+relatorios/
+*.txt
+!README.md
+!RELATORIO_FINAL.txt
+!test_output.txt
+
+# Logs
+*.log
+
+# Dados
+data/
+scratch/
+
+# Cache
+.kilo/
+.agent/
+
+kilo.json

@@ -1,0 +1,211 @@
+{
+  "name": "Busca Ativa - Triagem e Classificacao",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "triagem",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "webhook-node",
+      "name": "Webhook Triagem",
+      "type": "n8n-nodes-base.webhook",
+      "position": [240, 300],
+      "webhookId": "triagem"
+    },
+    {
+      "parameters": {
+        "values": {
+          "string": [
+            {
+              "name": "school_id",
+              "value": "={{ $json.school_id }}"
+            },
+            {
+              "name": "sender_jid",
+              "value": "={{ $json.sender_jid }}"
+            },
+            {
+              "name": "raw_message_id",
+              "value": "={{ $json.raw_message_id }}"
+            },
+            {
+              "name": "body",
+              "value": "={{ $json.message_text }}"
+            },
+            {
+              "name": "received_at",
+              "value": "={{ $json.received_at }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "set-message-data",
+      "name": "Set Message Data",
+      "type": "n8n-nodes-base.set",
+      "position": [460, 300]
+    },
+    {
+      "parameters": {
+        "model": "gpt-4",
+        "messages": [
+          {
+            "role": "system",
+            "content": "Você é um assistente que classifica mensagens de pais sobre faltas escolares. Analise o texto da mensagem e classifique o motivo da falta em uma das categorias: ILLNESS, WORK, TRAVEL, FAMILY, SCHOOL_ISSUE, OTHER.\n\nResponda apenas com JSON no formato:\n{\n  \"reason\": \"CATEGORIA\",\n  \"confidence\": 0.0-1.0,\n  \"explanation\": \"breve explicação\"\n}"
+          },
+          {
+            "role": "user",
+            "content": "={{ $json.body }}"
+          }
+        ],
+        "options": {}
+      },
+      "id": "openai-classify",
+      "name": "OpenAI Classify Reason",
+      "type": "n8n-nodes-base.openAi",
+      "position": [680, 300]
+    },
+    {
+      "parameters": {
+        "values": {
+          "string": [
+            {
+              "name": "reason",
+              "value": "={{ JSON.parse($json.choices[0].message.content).reason }}"
+            },
+            {
+              "name": "ai_confidence",
+              "value": "={{ JSON.parse($json.choices[0].message.content).confidence }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "parse-ai-response",
+      "name": "Parse AI Response",
+      "type": "n8n-nodes-base.set",
+      "position": [900, 300]
+    },
+    {
+      "parameters": {
+        "url": "http://localhost:8000/inbound/reply",
+        "method": "POST",
+        "sendBody": true,
+        "bodyContentType": "json",
+        "specifyBody": "json",
+        "jsonBody": "={{ {\n  \"school_id\": $node[\"Set Message Data\"].json.school_id,\n  \"sender_jid\": $node[\"Set Message Data\"].json.sender_jid,\n  \"raw_message_id\": $node[\"Set Message Data\"].json.raw_message_id,\n  \"body\": $node[\"Set Message Data\"].json.body,\n  \"received_at\": $node[\"Set Message Data\"].json.received_at,\n  \"reason\": $node[\"Parse AI Response\"].json.reason,\n  \"ai_confidence\": $node[\"Parse AI Response\"].json.ai_confidence\n} }}",
+        "options": {}
+      },
+      "id": "post-inbound-reply",
+      "name": "POST Inbound Reply",
+      "type": "n8n-nodes-base.httpRequest",
+      "position": [1120, 300]
+    },
+    {
+      "parameters": {
+        "values": {
+          "string": [
+            {
+              "name": "status",
+              "value": "={{ $json.ok ? 'success' : 'failed' }}"
+            },
+            {
+              "name": "message",
+              "value": "={{ $json.ok ? 'Mensagem classificada e salva' : 'Erro ao salvar' }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "set-response",
+      "name": "Set Response",
+      "type": "n8n-nodes-base.set",
+      "position": [1340, 300]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ $node[\"Set Response\"].json }}",
+        "options": {}
+      },
+      "id": "respond-to-webhook",
+      "name": "Respond to Webhook",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "position": [1560, 300]
+    }
+  ],
+  "connections": {
+    "Webhook Triagem": {
+      "main": [
+        [
+          {
+            "node": "Set Message Data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Set Message Data": {
+      "main": [
+        [
+          {
+            "node": "OpenAI Classify Reason",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "OpenAI Classify Reason": {
+      "main": [
+        [
+          {
+            "node": "Parse AI Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse AI Response": {
+      "main": [
+        [
+          {
+            "node": "POST Inbound Reply",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "POST Inbound Reply": {
+      "main": [
+        [
+          {
+            "node": "Set Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Set Response": {
+      "main": [
+        [
+          {
+            "node": "Respond to Webhook",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "staticData": null
+}

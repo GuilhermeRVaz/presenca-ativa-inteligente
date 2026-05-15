@@ -1,0 +1,300 @@
+{
+  "name": "Agente Triador - PAI (via API)",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "triagem",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "5f6c825a-4e89-42b4-82a1-123456789001",
+      "name": "Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [
+        0,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "text": "={{ $json.body.message_text }}",
+        "schemaType": "fromAttributes",
+        "attributes": {
+          "attributes": [
+            {
+              "name": "student_name",
+              "type": "string",
+              "description": "Nome do aluno mencionado na mensagem",
+              "required": true
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "5f6c825a-4e89-42b4-82a1-123456789002",
+      "name": "Information Extractor",
+      "type": "@n8n/n8n-nodes-langchain.informationExtractor",
+      "typeVersion": 1.2,
+      "position": [
+        200,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "model": "gpt-4o-mini",
+        "options": {}
+      },
+      "id": "5f6c825a-4e89-42b4-82a1-123456789007",
+      "name": "OpenAI Chat Model",
+      "type": "@n8n/n8n-nodes-langchain.lmChatOpenAi",
+      "typeVersion": 1,
+      "position": [
+        200,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "url": "https://cpniwvghxlkposaeyboa.supabase.co/rest/v1/students",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "apikey",
+              "value": "={{ $env.SUPABASE_KEY }}"
+            },
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{ $env.SUPABASE_KEY }}"
+            }
+          ]
+        },
+        "sendQueryParameters": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "select",
+              "value": "id,name,student_guardians(guardian_id)"
+            },
+            {
+              "name": "name",
+              "value": "=ilike.*{{ $json.student_name }}*"
+            },
+            {
+              "name": "limit",
+              "value": "1"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "5f6c825a-4e89-42b4-82a1-123456789003",
+      "name": "Busca Aluno (API)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [
+        450,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "condition-1",
+              "leftValue": "={{ $json[0]?.student_guardians[0]?.guardian_id }}",
+              "rightValue": "",
+              "operator": {
+                "type": "string",
+                "operation": "exists",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "5f6c825a-4e89-42b4-82a1-123456789004",
+      "name": "Achou Responsável?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        700,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://cpniwvghxlkposaeyboa.supabase.co/rest/v1/rpc/upsert_phone_identity",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "apikey",
+              "value": "={{ $env.SUPABASE_KEY }}"
+            },
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{ $env.SUPABASE_KEY }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "p_school_id",
+              "value": "={{ $('Webhook').item.json.body.school_id }}"
+            },
+            {
+              "name": "p_lid_jid",
+              "value": "={{ $('Webhook').item.json.body.lid_jid }}"
+            },
+            {
+              "name": "p_guardian_id",
+              "value": "={{ $json.student_guardians[0].guardian_id }}"
+            },
+            {
+              "name": "p_confidence",
+              "value": "HIGH"
+            },
+            {
+              "name": "p_source",
+              "value": "inbound"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "5f6c825a-4e89-42b4-82a1-123456789005",
+      "name": "RPC: Upsert Identity",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [
+        950,
+        -100
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "{\n  \"status\": \"success\",\n  \"message\": \"Identidade resolvida e salva com sucesso.\"\n}",
+        "options": {
+          "responseCode": 200
+        }
+      },
+      "id": "5f6c825a-4e89-42b4-82a1-123456789006",
+      "name": "Respond to Webhook Node (Sucesso)",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.5,
+      "position": [
+        1200,
+        -100
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "{\n  \"status\": \"failed\",\n  \"message\": \"Responsável não encontrado para o aluno informado.\"\n}",
+        "options": {
+          "responseCode": 200
+        }
+      },
+      "id": "5f6c825a-4e89-42b4-82a1-123456789008",
+      "name": "Respond to Webhook Node (Falha)",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.5,
+      "position": [
+        950,
+        150
+      ]
+    }
+  ],
+  "connections": {
+    "Webhook": {
+      "main": [
+        [
+          {
+            "node": "Information Extractor",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Information Extractor": {
+      "main": [
+        [
+          {
+            "node": "Busca Aluno (API)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "OpenAI Chat Model": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "Information Extractor",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Busca Aluno (API)": {
+      "main": [
+        [
+          {
+            "node": "Achou Responsável?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Achou Responsável?": {
+      "main": [
+        [
+          {
+            "node": "RPC: Upsert Identity",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Respond to Webhook Node (Falha)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "RPC: Upsert Identity": {
+      "main": [
+        [
+          {
+            "node": "Respond to Webhook Node (Sucesso)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {}
+}
