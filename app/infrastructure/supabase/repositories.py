@@ -483,6 +483,38 @@ class SupabaseRepository:
         )
         return self._message(rows[0]) if rows else None
 
+    def save_response(
+        self,
+        *,
+        school_id: str,
+        raw_message_id: str,
+        sender_jid: str,
+        body: str,
+        identity_confidence: str,
+        message_id: str | None,
+        guardian_id: str | None,
+        campaign_id: str | None,
+        student_id: str | None,
+        received_at: Any,
+        reason: str | None = None,
+        ai_confidence: float | None = None,
+    ) -> str:
+        response_id, _ = self.save_reply(
+            school_id=school_id,
+            raw_message_id=raw_message_id,
+            sender_jid=sender_jid,
+            body=body,
+            identity_confidence=identity_confidence,
+            message_id=message_id,
+            guardian_id=guardian_id,
+            campaign_id=campaign_id,
+            student_id=student_id,
+            reason=reason,
+            ai_confidence=ai_confidence,
+            received_at=received_at,
+        )
+        return response_id
+
     def save_reply(
         self,
         *,

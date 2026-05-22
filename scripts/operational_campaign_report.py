@@ -535,7 +535,10 @@ def main() -> int:
     recipients_csv, groups_csv = write_csvs(args.out_dir, stem, messages, groups)
     xlsx_path = write_xlsx(args.out_dir, stem, messages, groups)
 
-    print(markdown)
+    try:
+        print(markdown)
+    except UnicodeEncodeError:
+        print(markdown.encode('ascii', errors='replace').decode('ascii'))
     print(f"Relatorio Markdown: {md_path}")
     print(f"CSV destinatarios: {recipients_csv}")
     print(f"CSV interlocutores: {groups_csv}")

@@ -72,13 +72,14 @@ class ReportExporter:
                 priority_rows = []
                 for case in report.priority_cases:
                     priority_rows.append({
-                        "Aluno ID": case.student_id,
-                        "Nome do Aluno": case.student_name,
-                        "Motivo Classificado": case.reason,
-                        "Status": case.status,
-                        "Nível de Risco": case.risk_level,
-                        "Resumo da Conversa": case.summary,
-                        "Confiança IA": case.ai_confidence
+                        "Aluno ID": case.get("student_id", ""),
+                        "Sender JID": case.get("sender_jid", ""),
+                        "Status": case.get("status", ""),
+                        "Nível de Risco": case.get("risk_level", ""),
+                        "Precisa Follow-up": case.get("needs_followup", False),
+                        "Documento Médico": case.get("has_medical_document", False),
+                        "Resumo da Conversa": case.get("summary_text", ""),
+                        "Qtd Mensagens": case.get("message_count", 0),
                     })
                 pd.DataFrame(priority_rows).to_excel(writer, sheet_name='Casos Prioritários', index=False)
 
@@ -105,16 +106,17 @@ class ReportExporter:
         Gera um CSV simplificado dos casos prioritários para importação em outros sistemas.
         """
         if not report.priority_cases:
-            return "student_id,student_name,reason,risk_level\n"
+            return "student_id,status,risk_level,summary\n"
         
         priority_rows = []
         for case in report.priority_cases:
             priority_rows.append({
-                "student_id": case.student_id,
-                "student_name": case.student_name,
-                "reason": case.reason,
-                "risk_level": case.risk_level,
-                "status": case.status
+                "student_id": case.get("student_id", ""),
+                "sender_jid": case.get("sender_jid", ""),
+                "status": case.get("status", ""),
+                "risk_level": case.get("risk_level", ""),
+                "needs_followup": case.get("needs_followup", False),
+                "summary": case.get("summary_text", ""),
             })
         
         return pd.DataFrame(priority_rows).to_csv(index=False)

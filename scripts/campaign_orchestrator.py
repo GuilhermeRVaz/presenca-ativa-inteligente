@@ -14,6 +14,7 @@ import hashlib
 import random
 import sys
 import time
+import requests
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
@@ -87,6 +88,75 @@ def _try_supabase(query_factory: Callable[[], Any], *, label: str) -> bool:
             f"{label} ({type(exc).__name__}: {exc})"
         )
         return False
+
+
+def _capture_lid_after_send(
+    client,
+    *,
+    wa_jid: str,
+    guardian_id: str,
+    school_id: str,
+    evolution_url: str,
+    evolution_key: str,
+    instance: str,
+) -> None:
+    """Após um envio bem-sucedido, tenta capturar o LID do contato nas mensagens
+    inbound da conversa e salva no phone_identity_map para uso futuro.
+    Falhas são ignoradas silenciosamente para não bloquear o fluxo.
+    """
+    try:
+        url = f"{evolution_url.rstrip('/')}/chat/findMessages/{instance}"
+        headers = {"apikey": evolution_key, "Content-Type": "application/json"}
+        payload = {"where": {"key": {"remoteJid": wa_jid}}, "limit": 20}
+        r = requests.post(url, json=payload, headers=headers, timeout=10)
+        if r.status_code != 200:
+            return
+        records = r.json().get("messages", {}).get("records", [])
+
+        lid_jid = None
+        for rec in records:
+            key = rec.get("key", {})
+            if key.get("fromMe"):
+                continue
+            remote = key.get("remoteJid", "")
+            if remote.endswith("@lid"):
+                lid_jid = remote
+                break
+            participant = key.get("participant", "")
+            if participant and participant.endswith("@lid"):
+                lid_jid = participant
+                break
+
+        if not lid_jid:
+            return
+
+        # Verifica se já está mapeado
+        existing = (
+            client.schema("busca_ativa_v2")
+            .table("phone_identity_map")
+            .select("id")
+            .eq("lid_jid", lid_jid)
+            .limit(1)
+            .execute()
+        )
+        if existing.data:
+            return  # Já mapeado, sem necessidade de upsert
+
+        # Salva o novo LID
+        from app.infrastructure.supabase.repositories import SupabaseRepository
+        repo = SupabaseRepository()
+        repo.upsert_phone_identity(
+            school_id=school_id,
+            lid_jid=lid_jid,
+            wa_jid=wa_jid,
+            phone_e164=None,
+            guardian_id=guardian_id,
+            confidence="HIGH",
+            source="outbound",
+        )
+        print(f"{Colors.CYAN}  [LID]{Colors.RESET} Capturado e mapeado: {lid_jid}")
+    except Exception:
+        pass  # Não bloqueia o fluxo principal
 
 
 def _message_status_counts(client, campaign_id: str) -> dict[str, int]:
@@ -228,6 +298,16 @@ async def run_orchestrator(campaign_id: str | None, dry_run: bool = False) -> No
                         )
                         .eq("id", msg_id),
                         label=f"marcar enviado: {student_name}",
+                    )
+                    # Captura o LID do contato para enriquecer o phone_identity_map
+                    _capture_lid_after_send(
+                        client,
+                        wa_jid=wa_jid,
+                        guardian_id=str(msg.get("guardian_id", "")),
+                        school_id=str(msg.get("metadata", {}).get("school_id", "") or ""),
+                        evolution_url=settings.evolution_api_url,
+                        evolution_key=settings.evolution_api_key,
+                        instance=settings.evolution_api_instance,
                     )
                 total_sent += 1
             else:

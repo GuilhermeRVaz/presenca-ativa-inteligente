@@ -1,19 +1,29 @@
 """
-campaign_reporter.py — Fase 3: Geração de Relatório de Fechamento da Campanha (V4 - Analytics Integrado)
+campaign_reporter.py — Orquestrador de Relatorios (V5)
 
-Responsabilidades:
-  1. Executar a reconciliação retrospectiva para identificar conversas pendentes.
-  2. Gerar o relatório consolidado usando o motor de CampaignAnalytics.
-  3. Exportar o relatório executivo em Excel.
-  4. Exibir o resumo analítico e os insights no terminal.
+Executa automaticamente ao ser chamado pelo botao "Fase 3" do painel Streamlit.
+Gera TODOS os relatorios de uma campanha em sequencia:
+
+  0. Backfill de LIDs (mapeia identidades mascaras no WhatsApp)
+  1. Relatorio Executivo (metricas + Excel multi-planilha)
+  2. Diario Auditado de Conversas (TXT + MD por aluno)
+  3. Relatorio Completo (MD + CSV + Excel com justificativas)
+
+Uso:
+    python scripts/campaign_reporter.py
+    python scripts/campaign_reporter.py --campaign-id <uuid>
+    python scripts/campaign_reporter.py --skip-backfill
 """
 
 import argparse
 import sys
-from pathlib import Path
 from datetime import datetime
+from pathlib import Path
 
-# Cores para formatação
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+
+
 class Colors:
     GREEN = '\033[92m'
     RED = '\033[91m'
@@ -23,116 +33,201 @@ class Colors:
     BOLD = '\033[1m'
     RESET = '\033[0m'
 
-ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT))
 
-from app.core.config import settings
-from app.infrastructure.supabase.repositories import SupabaseRepository
-from app.application.analytics.campaign_analytics import CampaignAnalytics
-from app.application.analytics.report_exporter import ReportExporter
-
-def _build_repository() -> SupabaseRepository:
+def _get_repository():
+    from app.infrastructure.supabase.repositories import SupabaseRepository
     return SupabaseRepository()
 
-def run_reporter(campaign_id: str | None, export_excel: bool = True):
-    repository = _build_repository()
+
+def _find_latest_campaign(repo):
+    res = (repo.client.schema("busca_ativa_v2")
+           .table("campaigns")
+           .select("id, name, absence_days, created_at")
+           .order("created_at", desc=True)
+           .limit(1)
+           .execute())
+    if not res.data:
+        return None
+    c = res.data[0]
+    return {
+        "id": c["id"],
+        "name": c.get("name", "Campanha"),
+        "absence_days": c.get("absence_days", ""),
+        "created_at": c.get("created_at", "")
+    }
+
+
+def _get_campaign_info(repo, campaign_id):
+    res = (repo.client.schema("busca_ativa_v2")
+           .table("campaigns")
+           .select("name, absence_days")
+           .eq("id", campaign_id)
+           .execute())
+    if not res.data:
+        return None
+    return {"name": res.data[0]["name"], "absence_days": res.data[0].get("absence_days", "")}
+
+
+def run_orchestrator(campaign_id=None, skip_backfill=False):
+    """
+    Orquestra a geracao de todos os relatorios de uma campanha.
+
+    Args:
+        campaign_id: UUID da campanha. Se None, usa a mais recente.
+        skip_backfill: Se True, pula o mapeamento de LIDs.
+    """
+    from app.core.config import settings
+
+    repo = _get_repository()
     school_id = settings.default_school_id
 
-    # 1. Identificar a campanha
+    # ── Identificar campanha ──────────────────────────────────────────────
     if not campaign_id:
-        print(f"{Colors.CYAN}Buscando a campanha mais recente...{Colors.RESET}")
-        res = (
-            repository.client.schema("busca_ativa_v2")
-            .table("campaigns")
-            .select("id, name, created_at")
-            .order("created_at", desc=True)
-            .limit(1)
-            .execute()
-        )
-        if not res.data:
-            print(f"{Colors.RED}ERRO: Nenhuma campanha encontrada.{Colors.RESET}")
-            return
-        campaign_id = str(res.data[0]["id"])
-        campaign_name = res.data[0]["name"]
+        print(f"{Colors.CYAN}Buscando campanha mais recente...{Colors.RESET}")
+        camp = _find_latest_campaign(repo)
+        if not camp:
+            print(f"{Colors.RED}ERRO: Nenhuma campanha encontrada no banco.{Colors.RESET}")
+            return None
+        campaign_id = camp["id"]
+        campaign_name = camp["name"]
+        absence_days = camp["absence_days"]
     else:
-        # Puxar nome da campanha informada
-        res = repository.client.schema("busca_ativa_v2").table("campaigns").select("name").eq("id", campaign_id).execute()
-        if not res.data:
-            print(f"{Colors.RED}ERRO: Campanha não encontrada com ID: {campaign_id}{Colors.RESET}")
-            return
-        campaign_name = res.data[0]["name"]
+        info = _get_campaign_info(repo, campaign_id)
+        if not info:
+            print(f"{Colors.RED}ERRO: Campanha nao encontrada: {campaign_id}{Colors.RESET}")
+            return None
+        campaign_name = info["name"]
+        absence_days = info["absence_days"]
 
-    print(f"{Colors.GREEN}OK: Gerando relatório analítico para: {campaign_name}{Colors.RESET}")
+    print("=" * 65)
+    print(f"{Colors.BOLD}  RELATORIOS CONSOLIDADOS{Colors.RESET}")
+    print(f"  Campanha: {campaign_name}")
+    print(f"  Faltas:   {absence_days}")
+    print(f"  ID:       {campaign_id}")
+    print("=" * 65)
 
-    # 2. Executar Motor Analítico (Gera Reconciliação + Métricas)
-    print(f"{Colors.CYAN}Processando reconciliação e métricas...{Colors.RESET}")
-    analytics = CampaignAnalytics(repository)
-    report = analytics.generate_report(school_id, campaign_id)
+    stats = {}
 
-    # 3. Exibir Resumo no Terminal
-    print("\n" + "="*70)
-    print(f"{Colors.BOLD}RELATÓRIO ANALÍTICO DE FECHAMENTO{Colors.RESET}")
-    print("="*70)
-    print(f"{Colors.BOLD}Campanha:{Colors.RESET} {report.campaign_name}")
-    print(f"{Colors.BOLD}Data:{Colors.RESET} {report.generated_at.strftime('%d/%m/%Y %H:%M')}")
-    print("-" * 70)
-    
-    print(f"{Colors.BOLD}Métricas Operacionais:{Colors.RESET}")
-    print(f"  • Alunos Alvo:         {report.operational.total_students_targeted}")
-    print(f"  • Mensagens Enviadas:  {Colors.GREEN}{report.operational.messages_sent_success}{Colors.RESET}")
-    print(f"  • Respostas Totais:    {Colors.CYAN}{report.operational.responses_received}{Colors.RESET}")
-    print(f"  • Taxa de Resposta:    {Colors.BOLD}{report.operational.response_rate*100:.1f}%{Colors.RESET}")
-    
-    print(f"\n{Colors.BOLD}Falhas Estruturais:{Colors.RESET}")
-    print(f"  • Sem Responsável:     {Colors.YELLOW}{report.structural.no_guardian_linked}{Colors.RESET}")
-    print(f"  • Números Inválidos:   {Colors.YELLOW}{report.structural.invalid_numbers}{Colors.RESET}")
-    
-    print(f"\n{Colors.BOLD}Análise de Risco (Matriz PAI):{Colors.RESET}")
-    print(f"  • {Colors.RED}ALTO RISCO (Evasão): {report.risk.high_risk}{Colors.RESET}")
-    print(f"  • {Colors.YELLOW}MÉDIO RISCO:         {report.risk.medium_risk}{Colors.RESET}")
-    print(f"  • {Colors.GREEN}BAIXO RISCO (Just.): {report.risk.low_risk}{Colors.RESET}")
-    
-    print("-" * 70)
-    print(f"{Colors.BOLD}Insights Automáticos:{Colors.RESET}")
-    for insight in report.insights:
-        print(f"  💡 {insight}")
-    
-    print("-" * 70)
-    if report.priority_cases:
-        print(f"{Colors.BOLD}Casos Prioritários ({len(report.priority_cases)}):{Colors.RESET}")
-        for case in report.priority_cases[:5]: # Top 5
-            print(f"  ⚠️  {case.student_name}: {case.reason} ({case.risk_level})")
-        if len(report.priority_cases) > 5:
-            print(f"  ... e mais {len(report.priority_cases)-5} casos.")
+    # ── ETAPA 0: Backfill de LIDs ─────────────────────────────────────────
+    if not skip_backfill:
+        print(f"\n{Colors.CYAN}[ETAPA 1/4] Backfill de LIDs (mapeamento de identidades)...{Colors.RESET}")
+        try:
+            from scripts.backfill_lids_from_conversations import run as backfill_run
+            backfill_run(campaign_id=campaign_id, dry_run=False)
+            print(f"{Colors.GREEN}  OK{Colors.RESET}")
+        except Exception as e:
+            print(f"{Colors.YELLOW}  AVISO: Backfill falhou: {e}{Colors.RESET}")
+            print(f"{Colors.YELLOW}  Continuando com os LIDs ja mapeados...{Colors.RESET}")
+    else:
+        print(f"\n{Colors.YELLOW}[ETAPA 1/4] Backfill PULADO (--skip-backfill){Colors.RESET}")
 
-    # 4. Exportar para Excel
-    if export_excel:
-        print(f"\n{Colors.CYAN}Exportando relatório executivo para Excel...{Colors.RESET}")
+    # ── ETAPA 1: Relatorio Executivo ──────────────────────────────────────
+    print(f"\n{Colors.CYAN}[ETAPA 2/4] Relatorio Executivo (metricas + Excel)...{Colors.RESET}")
+    try:
+        from app.application.analytics.campaign_analytics import CampaignAnalytics
+        from app.application.analytics.report_exporter import ReportExporter
+
+        analytics = CampaignAnalytics(repo)
+        report = analytics.generate_report(school_id, campaign_id)
+
+        print(f"  Alunos alvo:    {report.operational.total_students_targeted}")
+        print(f"  Enviados:       {report.operational.messages_sent_success}")
+        print(f"  Respostas:      {report.operational.responses_received}")
+        print(f"  Taxa resposta:  {report.operational.response_rate*100:.1f}%")
+
         exporter = ReportExporter()
         excel_bytes = exporter.to_excel_bytes(report)
-        
         timestamp = datetime.now().strftime("%Y%m%d_%H%M")
-        filename = f"Relatorio_Executivo_{campaign_id[:8]}_{timestamp}.xlsx"
-        export_dir = ROOT / "relatorios"
-        export_dir.mkdir(exist_ok=True)
-        
-        file_path = export_dir / filename
-        with open(file_path, "wb") as f:
-            f.write(excel_bytes)
-        
-        print(f"{Colors.GREEN}✅ Relatório salvo em: {file_path}{Colors.RESET}")
+        excel_file = ROOT / "relatorios" / f"Relatorio_Executivo_{campaign_id[:8]}_{timestamp}.xlsx"
+        excel_file.parent.mkdir(exist_ok=True)
+        excel_file.write_bytes(excel_bytes)
+        print(f"{Colors.GREEN}  Excel: {excel_file}{Colors.RESET}")
 
-    print("="*70 + "\n")
+        stats["targeted"] = report.operational.total_students_targeted
+        stats["sent"] = report.operational.messages_sent_success
+        stats["responses"] = report.operational.responses_received
+        stats["rate"] = report.operational.response_rate
+    except Exception as e:
+        print(f"{Colors.YELLOW}  AVISO: Relatorio executivo falhou: {e}{Colors.RESET}")
+
+    # ── ETAPA 2: Diario Auditado ─────────────────────────────────────────
+    print(f"\n{Colors.CYAN}[ETAPA 3/4] Diario Auditado de Conversas (TXT + MD)...{Colors.RESET}")
+    try:
+        from scripts.consolidate_campaign_report import run_consolidate
+        result = run_consolidate(campaign_id=campaign_id, school_id=school_id)
+        print(f"  Conversas:      {result['total_conversas']}")
+        print(f"  Responderam:    {result['responderam']}")
+        print(f"  Justificaram:   {result['justificaram']}")
+        print(f"  Sem resposta:   {result['sem_resposta']}")
+        evo = result.get('evolution_encontrados', 0)
+        if evo:
+            print(f"  Via Evolution:  {evo} (detectados no WhatsApp, nao estavam no banco)")
+        print(f"{Colors.GREEN}  Arquivos: relatorios/consolidados/{result['arquivos'][0]}{Colors.RESET}")
+
+        stats["conversas"] = result["total_conversas"]
+        stats["responderam"] = result["responderam"]
+        stats["justificaram"] = result["justificaram"]
+        stats["sem_resposta"] = result["sem_resposta"]
+        if stats.get("sent"):
+            stats["rate"] = result["responderam"] / stats["sent"]
+    except Exception as e:
+        print(f"{Colors.YELLOW}  AVISO: Diario auditado falhou: {e}{Colors.RESET}")
+
+    # ── ETAPA 3: Relatorio Completo ───────────────────────────────────────
+    print(f"\n{Colors.CYAN}[ETAPA 4/4] Relatorio Completo (MD + CSV + Excel)...{Colors.RESET}")
+    try:
+        from scripts.full_day_report import build_report, write_outputs, make_client
+        client = make_client()
+        markdown = build_report(client, campaign_id)
+        camp_date = datetime.now().strftime("%d_%m_%Y")
+        stem = f"relatorio_completo_{camp_date}_{campaign_id[:8]}"
+        out_dir = ROOT / "relatorios" / "campanhas_v2"
+        write_outputs(out_dir, stem, markdown)
+        print(f"{Colors.GREEN}  MD:  {out_dir / f'{stem}.md'}{Colors.RESET}")
+        print(f"{Colors.GREEN}  CSV: {out_dir / f'{stem}_sem_resposta.csv'}{Colors.RESET}")
+        print(f"{Colors.GREEN}  XLSX:{out_dir / f'{stem}.xlsx'}{Colors.RESET}")
+    except Exception as e:
+        print(f"{Colors.YELLOW}  AVISO: Relatorio completo falhou: {e}{Colors.RESET}")
+
+    # ── Resumo final ──────────────────────────────────────────────────────
+    print("\n" + "=" * 65)
+    print(f"{Colors.BOLD}  RESUMO DA CAMPANHA{Colors.RESET}")
+    print("=" * 65)
+    if stats:
+        if "sent" in stats:
+            print(f"  Enviados:      {stats.get('sent', '?')}")
+        if "responderam" in stats:
+            print(f"  Responderam:   {stats.get('responderam', '?')}")
+        if "justificaram" in stats:
+            print(f"  Justificaram:  {stats.get('justificaram', '?')}")
+        if "sem_resposta" in stats:
+            print(f"  Sem resposta:  {stats.get('sem_resposta', '?')}")
+        if "rate" in stats:
+            print(f"  Taxa:          {stats['rate']*100:.1f}%")
+
+    print(f"\n{Colors.BOLD}  ARQUIVOS GERADOS{Colors.RESET}")
+    print(f"  relatorios/consolidados/auditoria_*.txt")
+    print(f"  relatorios/consolidados/auditoria_*.md")
+    print(f"  relatorios/campanhas_v2/relatorio_completo_*.md")
+    print(f"  relatorios/campanhas_v2/relatorio_completo_*.csv")
+    print(f"  relatorios/campanhas_v2/relatorio_completo_*.xlsx")
+    print(f"  relatorios/Relatorio_Executivo_*.xlsx")
+    print("=" * 65 + "\n")
+
+    return stats
+
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Fase 3: Reporter Analítico da Campanha")
-    parser.add_argument("--campaign-id", type=str, default=None, help="ID da campanha. Se não informado, pega a mais recente.")
-    parser.add_argument("--no-excel", action="store_true", help="Não gerar o arquivo Excel.")
+    parser = argparse.ArgumentParser(description="Orquestrador de Relatorios de Campanha (V5)")
+    parser.add_argument("--campaign-id", type=str, default=None,
+                        help="UUID da campanha. Se nao informado, usa a mais recente.")
+    parser.add_argument("--skip-backfill", action="store_true",
+                        help="Pular o mapeamento de LIDs (mais rapido, porem menos respostas detectadas).")
     args = parser.parse_args()
 
     try:
-        run_reporter(campaign_id=args.campaign_id, export_excel=not args.no_excel)
+        run_orchestrator(campaign_id=args.campaign_id, skip_backfill=args.skip_backfill)
     except Exception as e:
-        print(f"\n{Colors.RED}❌ ERRO AO GERAR RELATÓRIO: {e}{Colors.RESET}")
+        print(f"\n{Colors.RED}ERRO CRITICO: {e}{Colors.RESET}")
         import traceback
         traceback.print_exc()

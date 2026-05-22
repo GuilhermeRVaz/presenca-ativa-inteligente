@@ -1,0 +1,12 @@
+{
+  "SessionStart": [
+    {
+      "hooks": [
+        {
+          "type": "command",
+          "command": "\"C:/Program Files/nodejs/node.exe\" \"C:/Users/user/presenca-ativa-inteligente/.codex/hooks/gsd-check-update.js\""
+        }
+      ]
+    }
+  ]
+}

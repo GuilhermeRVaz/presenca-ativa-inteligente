@@ -1,0 +1,2 @@
+description = "Manage persistent context threads for cross-session work"
+prompt = "<objective>\nCreate, list, close, or resume persistent context threads. Threads are lightweight\ncross-session knowledge stores for work that spans multiple sessions but\ndoesn't belong to any specific phase.\n</objective>\n\n<execution_context>\n@C:/Users/user/presenca-ativa-inteligente/.gemini/get-shit-done/workflows/thread.md\n</execution_context>\n\n<process>\nExecute end-to-end.\n</process>"

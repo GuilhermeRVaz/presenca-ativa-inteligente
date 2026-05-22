@@ -95,6 +95,7 @@ Opere a campanha de disparos diretamente por este painel após a extração da S
 
 dia = st.text_input("Dia da Campanha (Filtro para Fase 1)", value="4", help="O dia exato a ser buscado no Excel da SEDUC.")
 dry_run = st.toggle("🧪 Modo Simulação (Dry Run)", value=True, help="Executa as fases sem gravar disparos reais na API do WhatsApp.")
+skip_backfill = st.toggle("⚡ Pular Backfill de LIDs (mais rapido)", value=False, help="Se ligado, nao varre os chats @lid do WhatsApp antes de gerar os relatorios. Menos respostas serao detectadas.")
 
 st.divider()
 
@@ -118,5 +119,8 @@ with col2:
         run_script_live(cmd, "Fase 2: Disparos")
 
 with col3:
-    if st.button("3️⃣ Gerar Relatório de Fechamento (Fase 3)", use_container_width=True):
-        run_script_live([sys.executable, "-u", "scripts/campaign_reporter.py"], "Fase 3: Relatório de Fechamento")
+    if st.button("3️⃣ Gerar Relatórios Consolidados (Fase 3)", use_container_width=True):
+        cmd = [sys.executable, "-u", "scripts/campaign_reporter.py"]
+        if skip_backfill:
+            cmd.append("--skip-backfill")
+        run_script_live(cmd, "Fase 3: Relatórios Consolidados")

@@ -12,13 +12,32 @@ from typing import Any
 import requests
 from dotenv import load_dotenv
 
-ROOT_DIR = Path(__file__).resolve().parent.parent
-if str(ROOT_DIR) not in sys.path:
-    sys.path.insert(0, str(ROOT_DIR))
+# Ensure the project root is in PYTHONPATH so "from app..." works
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+load_dotenv(PROJECT_ROOT / ".env")
 
 from app.core.config import settings
 from app.infrastructure.followup_message_catalog import FollowupMessageCatalog
 from app.infrastructure.supabase.repositories import SupabaseRepository
+
+
+def _retry_supabase(operation, max_attempts: int = 5, base_delay: float = 2.0):
+    """Retry wrapper for transient Supabase/PostgREST connection errors."""
+    last_exc = None
+    for attempt in range(1, max_attempts + 1):
+        try:
+            return operation()
+        except Exception as exc:
+            last_exc = exc
+            if attempt == max_attempts:
+                break
+            delay = base_delay * (2 ** (attempt - 1))
+            print(f"[retry {attempt}/{max_attempts}] Supabase falhou ({type(exc).__name__}), aguardando {delay:.1f}s...")
+            time.sleep(delay)
+    raise last_exc  # type: ignore[misc]
 
 
 DEFAULT_SOURCE = (
@@ -104,7 +123,6 @@ def main() -> int:
     parser.add_argument("--allow-duplicate-phones", action="store_true")
     args = parser.parse_args()
 
-    load_dotenv(".env")
     repository = SupabaseRepository()
     client = repository.client.schema("busca_ativa_v2")
     catalog = FollowupMessageCatalog(school_name=settings.school_name)
@@ -121,7 +139,9 @@ def main() -> int:
         if not ra or not phone:
             print(f"SKIP invalid row ra={ra!r} phone={phone!r}")
             continue
-        student_id = find_student_id(client, school_id=args.school_id, ra=ra)
+        student_id = _retry_supabase(
+            lambda: find_student_id(client, school_id=args.school_id, ra=ra)
+        )
         if not student_id:
             print(f"SKIP student not found ra={ra}")
             continue
@@ -146,10 +166,12 @@ def main() -> int:
     print(f"items={len(prepared)}")
 
     for index, item in enumerate(prepared, start=1):
-        context = repository.get_outbound_context(
-            school_id=args.school_id,
-            student_id=item["student_id"],
-            campaign_id=args.campaign_id,
+        context = _retry_supabase(
+            lambda: repository.get_outbound_context(
+                school_id=args.school_id,
+                student_id=item["student_id"],
+                campaign_id=args.campaign_id,
+            )
         )
         tracking_ref = f"CMP{args.campaign_id}-STU{item['student_id']}"
         template_id, body = catalog.build_message(
@@ -159,6 +181,7 @@ def main() -> int:
             absence_days=context.campaign.absence_days,
             campaign_id=args.campaign_id,
             unique_key=f"{item['student_id']}|{context.guardian.id}",
+            campaign_name=context.campaign.name,
         )
         body = f"{body}\n\nProtocolo: {short_protocol(tracking_ref)}"
 
@@ -170,7 +193,9 @@ def main() -> int:
         if not args.real_send:
             continue
 
-        if message_already_exists(client, campaign_id=args.campaign_id, student_id=item["student_id"]):
+        if _retry_supabase(
+            lambda: message_already_exists(client, campaign_id=args.campaign_id, student_id=item["student_id"])
+        ):
             print("SKIP already has message for this campaign/student")
             continue
 

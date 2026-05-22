@@ -32,7 +32,11 @@ class CampaignAnalytics:
         logger.info("analytics_report_generation_started", campaign_id=campaign_id)
 
         # 1. Executar Reconciliação Retrospectiva primeiro para garantir dados limpos
-        self.reconciler.reconcile_unresolved_responses(window_hours=48)
+        self.reconciler.reconcile_unresolved_responses(
+            window_hours=48,
+            school_id=school_id,
+            campaign_id=campaign_id,
+        )
 
         # 2. Buscar Dados de Outbound (Estruturais e Operacionais)
         outbound_res = self.client.schema("busca_ativa_v2").table("messages") \
@@ -58,7 +62,7 @@ class CampaignAnalytics:
         reports = [self.summarizer.summarize(t) for t in threads]
         
         responses_received = len(reports)
-        response_rate = (responses_received / sent_success * 100) if sent_success > 0 else 0
+        response_rate = (responses_received / sent_success) if sent_success > 0 else 0
 
         # 4. Análise de Justificativas e Riscos
         justifications = CampaignJustificationAnalysis(
@@ -82,7 +86,7 @@ class CampaignAnalytics:
             insights.append(f"Foram identificados {justifications.medical_documents} casos com menção a documentos médicos.")
         if risk.high_risk > (total_targeted * 0.3):
             insights.append("Alerta: Volume de alto risco acima do esperado.")
-        if response_rate > 70:
+        if response_rate > 0.70:
             insights.append("Excelente engajamento das famílias na campanha.")
 
         # 6. Análise por Turma (Simulado - precisaria de join com students para real)
@@ -106,7 +110,7 @@ class CampaignAnalytics:
         return ConsolidatedCampaignReport(
             campaign_id=campaign_id,
             campaign_name=campaign_name,
-            generated_at=datetime.now(),
+            generated_at=datetime.now().isoformat(),
             operational=CampaignOperationalMetrics(
                 total_students_targeted=total_targeted,
                 messages_sent_success=sent_success,
@@ -119,7 +123,7 @@ class CampaignAnalytics:
             risk=risk,
             insights=insights,
             class_analysis=class_analysis,
-            priority_cases=priority_cases[:10] # Top 10 prioridades
+            priority_cases=[r.model_dump() for r in priority_cases[:10]] # Top 10 prioridades
         )
 
     def export_to_json(self, report: ConsolidatedCampaignReport) -> str:
