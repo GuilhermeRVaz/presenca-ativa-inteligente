@@ -116,10 +116,17 @@ def _short_protocol(tracking_ref: str) -> str:
 
 def get_campaign_protocol_map(repo, campaign_id: str) -> dict:
     """Retorna {protocol -> {wa_jid, guardian_id, school_id, student_name}} da campanha."""
+    if isinstance(campaign_id, list):
+        campaign_ids = campaign_id
+    elif isinstance(campaign_id, str) and "," in campaign_id:
+        campaign_ids = [c.strip() for c in campaign_id.split(",")]
+    else:
+        campaign_ids = [campaign_id]
+        
     msgs = (repo.client.schema("busca_ativa_v2")
             .table("messages")
             .select("wa_jid, tracking_ref, guardian_id, school_id, student_id, status")
-            .eq("campaign_id", campaign_id)
+            .in_("campaign_id", campaign_ids)
             .execute().data or [])
 
     students = {s["id"]: s["name"] for s in

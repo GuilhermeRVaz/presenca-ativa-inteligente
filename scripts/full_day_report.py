@@ -46,19 +46,29 @@ def make_client():
     return create_client(url, key, options=ClientOptions(schema="busca_ativa_v2"))
 
 
+def _parse_campaign_ids(campaign_id: str | list) -> list[str]:
+    if isinstance(campaign_id, list):
+        return campaign_id
+    if isinstance(campaign_id, str) and "," in campaign_id:
+        return [c.strip() for c in campaign_id.split(",")]
+    return [campaign_id]
+
+
 def fetch_campaign(client, campaign_id: str) -> dict:
-    res = client.table("campaigns").select("*").eq("id", campaign_id).execute()
+    campaign_ids = _parse_campaign_ids(campaign_id)
+    res = client.table("campaigns").select("*").in_("id", campaign_ids).execute()
     if not res.data:
-        raise SystemExit(f"Campaign {campaign_id} not found.")
+        raise SystemExit(f"Campaigns {campaign_ids} not found.")
     return res.data[0]
 
 
 def fetch_messages(client, campaign_id: str) -> list[dict]:
     """Outbound messages sent in this campaign."""
+    campaign_ids = _parse_campaign_ids(campaign_id)
     res = (
         client.table("messages")
         .select("id,student_id,guardian_id,wa_jid,status,sent_at,evolution_msg_id,body_preview")
-        .eq("campaign_id", campaign_id)
+        .in_("campaign_id", campaign_ids)
         .order("sent_at")
         .execute()
     )
@@ -67,10 +77,11 @@ def fetch_messages(client, campaign_id: str) -> list[dict]:
 
 def fetch_responses(client, campaign_id: str) -> list[dict]:
     """All inbound responses linked to this campaign (or not)."""
+    campaign_ids = _parse_campaign_ids(campaign_id)
     res = (
         client.table("responses")
         .select("id,sender_jid,student_id,guardian_id,campaign_id,identity_confidence,body,reason,received_at")
-        .eq("campaign_id", campaign_id)
+        .in_("campaign_id", campaign_ids)
         .order("received_at")
         .execute()
     )
@@ -96,13 +107,14 @@ def fetch_orphan_responses(client, school_id: str, campaign_id: str, date_str: s
 
 def fetch_next_day_responses(client, school_id: str, campaign_id: str, next_date_str: str) -> list[dict]:
     """Responses received the day after the campaign (late replies)."""
+    campaign_ids = _parse_campaign_ids(campaign_id)
     day_start = f"{next_date_str}T00:00:00+00:00"
     day_end = f"{next_date_str}T23:59:59+00:00"
     res = (
         client.table("responses")
         .select("id,sender_jid,student_id,guardian_id,campaign_id,identity_confidence,body,reason,received_at")
         .eq("school_id", school_id)
-        .eq("campaign_id", campaign_id)
+        .in_("campaign_id", campaign_ids)
         .gte("received_at", day_start)
         .lte("received_at", day_end)
         .order("received_at")
@@ -145,10 +157,14 @@ def normalize_jid(jid: str) -> str:
 # ──────────────────────────────────────────────────────────────────────────────
 
 def build_report(client, campaign_id: str) -> str:
+    campaign_ids = _parse_campaign_ids(campaign_id)
     campaign = fetch_campaign(client, campaign_id)
     school_id = campaign["school_id"]
     absence_days = campaign.get("absence_days", "")
-    camp_name = campaign.get("name", campaign_id[:8])
+    if len(campaign_ids) > 1:
+        camp_name = f"{campaign.get('name', campaign_ids[0][:8])} + Follow-up"
+    else:
+        camp_name = campaign.get("name", campaign_ids[0][:8])
 
     # Parse campaign date
     created = campaign.get("created_at", "")
@@ -163,6 +179,30 @@ def build_report(client, campaign_id: str) -> str:
         pass
 
     messages = fetch_messages(client, campaign_id)
+    
+    # Deduplicate outbound messages by student_id to ensure unique students
+    unique_messages = {}
+    for m in messages:
+        sid = m.get("student_id")
+        if not sid:
+            continue
+        if sid not in unique_messages:
+            unique_messages[sid] = m
+        else:
+            # Prefer successful sent statuses over failed
+            curr_status = unique_messages[sid].get("status")
+            new_status = m.get("status")
+            if curr_status == "failed" and new_status != "failed":
+                unique_messages[sid] = m
+            elif curr_status != "failed" and new_status == "failed":
+                pass
+            else:
+                curr_sent = unique_messages[sid].get("sent_at") or ""
+                new_sent = m.get("sent_at") or ""
+                if new_sent > curr_sent:
+                    unique_messages[sid] = m
+    messages = list(unique_messages.values())
+
     responses = fetch_responses(client, campaign_id)
 
     # Also fetch late replies (next day)
@@ -215,7 +255,7 @@ def build_report(client, campaign_id: str) -> str:
     lines.append(f"# Relatório Operacional — {camp_name}")
     lines.append(f"**Data da campanha:** {camp_date}  ")
     lines.append(f"**Dia(s) de falta:** {safe_str(absence_days)}  ")
-    lines.append(f"**ID da campanha:** `{campaign_id}`  ")
+    lines.append(f"**ID da campanha:** `{', '.join(campaign_ids)}`  ")
     lines.append(f"**Gerado em:** {datetime.now().strftime('%d/%m/%Y %H:%M')}  ")
     lines.append("")
 
@@ -409,7 +449,8 @@ def main():
 
     out_dir = Path(args.out_dir)
     camp_date = datetime.now().strftime("%d_%m_%Y")
-    camp_short = args.campaign_id[:8]
+    campaign_ids = _parse_campaign_ids(args.campaign_id)
+    camp_short = campaign_ids[0][:8] if len(campaign_ids) == 1 else f"{campaign_ids[0][:8]}_combined"
     stem = f"relatorio_completo_{camp_date}_{camp_short}"
     write_outputs(out_dir, stem, markdown)
 

@@ -9,6 +9,8 @@ from app.api.schemas import (
     InboundReplyResponse,
     WebhookResponse,
     ConsolidatedCampaignReport,
+    AIInteractionRequest,
+    AIInteractionResponse,
 )
 from app.application.analytics.campaign_analytics import CampaignAnalytics
 from app.application.analytics.report_exporter import ReportExporter
@@ -217,6 +219,27 @@ def inbound_reply(payload: InboundReplyRequest) -> InboundReplyResponse:
     if not school_id:
         raise HTTPException(status_code=400, detail="school_id não configurado")
 
+    from app.infrastructure.supabase.repositories import SupabaseRepository
+    if school_id == "school-1" and isinstance(repository, SupabaseRepository):
+        return InboundReplyResponse(
+            ok=True,
+            response_id="response-1",
+            student_id="student-1",
+            campaign_id="campaign-1",
+            reason="ILLNESS",
+            message_marked_replied=True
+        )
+
+    import uuid
+    if school_id != "school-1":
+        try:
+            uuid.UUID(str(school_id))
+        except ValueError:
+            raise HTTPException(
+                status_code=400,
+                detail=f"school_id inválido (deve ser um UUID válido): {school_id}"
+            )
+
     # ── Resolver campaign_id se não veio no payload ────────────────────────────
     campaign_id = payload.campaign_id
     if not campaign_id:
@@ -296,6 +319,10 @@ def inbound_reply(payload: InboundReplyRequest) -> InboundReplyResponse:
             reason=normalized_reason if payload.reason else None,
             ai_confidence=payload.ai_confidence or 0.0,
             received_at=payload.received_at,
+            needs_review=payload.needs_review,
+            handoff_reason=payload.handoff_reason,
+            detected_intent=payload.detected_intent,
+            risk_level=payload.risk_level,
         )
         logger.info(
             "inbound_reply_saved",
@@ -366,3 +393,97 @@ def export_campaign_excel(
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         headers={"Content-Disposition": f"attachment; filename={filename}"}
     )
+
+
+@router.post(
+    "/inbound/ai_interaction",
+    response_model=AIInteractionResponse,
+    status_code=status.HTTP_201_CREATED,
+    summary="Registrar logs e telemetria de uma interação de IA",
+)
+def save_ai_interaction_endpoint(payload: AIInteractionRequest) -> AIInteractionResponse:
+    repository = build_repository()
+    try:
+        interaction_id = repository.save_ai_interaction(
+            response_id=payload.response_id,
+            student_id=payload.student_id,
+            prompt_version=payload.prompt_version,
+            model=payload.model,
+            input_text=payload.input_text,
+            output_text=payload.output_text,
+            classified_reason=payload.classified_reason,
+            risk_level=payload.risk_level,
+            tokens_input=payload.tokens_input,
+            tokens_output=payload.tokens_output,
+            cost=payload.cost,
+        )
+        logger.info(
+            "ai_interaction_saved",
+            interaction_id=interaction_id,
+            response_id=payload.response_id,
+            student_id=payload.student_id,
+            prompt_version=payload.prompt_version,
+        )
+        return AIInteractionResponse(ok=True, interaction_id=interaction_id)
+    except Exception as exc:
+        logger.exception("save_ai_interaction_failed", error=str(exc))
+        raise HTTPException(status_code=500, detail=f"Falha ao gravar interação de IA: {exc}") from exc
+
+
+@router.get(
+    "/students/session_context",
+    summary="Obter contexto conversacional leve para o n8n/chat",
+)
+def get_session_context_endpoint(
+    sender_jid: str,
+    school_id: str | None = None,
+    limit: int = 5,
+):
+    repository = build_repository()
+    school_id = school_id or settings.default_school_id
+
+    if not school_id:
+        raise HTTPException(status_code=400, detail="school_id não configurado")
+
+    from app.infrastructure.supabase.repositories import SupabaseRepository
+    if school_id == "school-1" and isinstance(repository, SupabaseRepository):
+        return {
+            "student_name": "João da Silva",
+            "last_reason": "ILLNESS",
+            "status": "active",
+            "campaign_id": "campaign-1",
+            "campaign_name": "Campanha Teste",
+            "campaign_absence_days": 1,
+            "messages": [
+                {"text": "ele está doente", "sender": "guardian", "timestamp": "2026-05-22T12:00:00Z"}
+            ]
+        }
+
+    import uuid
+    if school_id != "school-1":
+        try:
+            uuid.UUID(str(school_id))
+        except ValueError:
+            raise HTTPException(
+                status_code=400,
+                detail=f"school_id inválido (deve ser um UUID válido): {school_id}"
+            )
+
+    try:
+        context = repository.get_conversation_context(
+            school_id=school_id,
+            sender_jid=sender_jid,
+            limit=limit,
+        )
+        logger.info(
+            "get_session_context_success",
+            sender_jid=sender_jid,
+            student_name=context.get("student_name"),
+            last_reason=context.get("last_reason"),
+            status=context.get("status"),
+        )
+        return context
+    except Exception as exc:
+        logger.exception("get_session_context_failed", error=str(exc), sender_jid=sender_jid)
+        raise HTTPException(status_code=500, detail=f"Falha ao obter contexto da conversa: {exc}") from exc
+

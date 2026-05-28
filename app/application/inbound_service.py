@@ -36,6 +36,16 @@ class InboundService:
             return WebhookResponse(status="ignored_missing_message_id")
 
         if inbound.from_me:
+            school_id = inbound.school_id or settings.default_school_id
+            if school_id and inbound.sender_jid:
+                try:
+                    self.repository.set_human_takeover(
+                        school_id=school_id,
+                        sender_jid=inbound.sender_jid,
+                    )
+                    logger.info("human_takeover_recorded_via_from_me", sender_jid=inbound.sender_jid)
+                except Exception as e:
+                    logger.warning("failed_to_record_human_takeover", error=str(e), sender_jid=inbound.sender_jid)
             return WebhookResponse(
                 status="ignored_from_me",
                 message_id=inbound.message_id,
@@ -106,16 +116,18 @@ class InboundService:
             )
 
             if identity.confidence == "UNRESOLVED":
-                triggered = self._trigger_n8n_triagem(
-                    school_id=resolved_school_id,
-                    sender_jid=inbound.sender_jid,
-                    raw_message_id=inbound.message_id,
-                    text=inbound.text,
-                    received_at=inbound.timestamp.isoformat()
-                    if inbound.timestamp
-                    else None,
-                    push_name=inbound.push_name,
-                )
+                triggered = False
+                if settings.enable_conversational_agent:
+                    triggered = self._trigger_n8n_triagem(
+                        school_id=resolved_school_id,
+                        sender_jid=inbound.sender_jid,
+                        raw_message_id=inbound.message_id,
+                        text=inbound.text,
+                        received_at=inbound.timestamp.isoformat()
+                        if inbound.timestamp
+                        else None,
+                        push_name=inbound.push_name,
+                    )
                 if triggered:
                     # Re-resolve identity after n8n flow has (potentially) updated the database
                     identity = self.identity_resolver.resolve_identity(
@@ -157,6 +169,111 @@ class InboundService:
                 inbound=inbound,
                 identity=identity,
             )
+
+            # Se a identidade foi resolvida, disparar webhook de chat
+            if identity.confidence != "UNRESOLVED":
+                student_id = None
+                if identity.message:
+                    student_id = identity.message.student_id
+                elif identity.session:
+                    student_id = identity.session.student_id
+
+                if settings.enable_conversational_agent:
+                    # Debounce Check: Evitar spam e loops se receber mensagem idêntica em < 30s
+                    is_spam = False
+                    try:
+                        last_resp = self.repository.client.schema("busca_ativa_v2") \
+                            .table("responses") \
+                            .select("body, received_at") \
+                            .eq("school_id", resolved_school_id) \
+                            .eq("sender_jid", inbound.sender_jid) \
+                            .order("received_at", desc=True) \
+                            .limit(2) \
+                            .execute()
+
+                        if last_resp.data and len(last_resp.data) >= 2:
+                            # O índice 0 é a resposta que acabamos de salvar. O índice 1 é a anterior.
+                            previous = last_resp.data[1]
+                            prev_body = previous.get("body")
+                            prev_received = previous.get("received_at")
+
+                            if prev_body == inbound.text and prev_received:
+                                from datetime import datetime, timezone
+                                prev_dt = datetime.fromisoformat(prev_received.replace('Z', '+00:00'))
+                                now_dt = inbound.timestamp if inbound.timestamp else datetime.now(timezone.utc)
+                                if now_dt.tzinfo is None:
+                                    now_dt = now_dt.replace(tzinfo=timezone.utc)
+
+                                delta = (now_dt - prev_dt).total_seconds()
+                                if delta < 30.0:
+                                    is_spam = True
+                                    logger.info(
+                                        "inbound_conversational_debounced",
+                                        sender_jid=inbound.sender_jid,
+                                        text=inbound.text,
+                                        time_delta_seconds=delta
+                                    )
+                    except Exception as debounce_exc:
+                        logger.warning("debounce_check_failed", error=str(debounce_exc))
+
+                    # Handoff Check: Evitar responder automaticamente se houver atendimento humano ativo (< 24h)
+                    is_handoff = False
+                    try:
+                        latest_resp = self.repository.client.schema("busca_ativa_v2") \
+                            .table("responses") \
+                            .select("needs_review, handoff_at") \
+                            .eq("school_id", resolved_school_id) \
+                            .eq("sender_jid", inbound.sender_jid) \
+                            .order("received_at", desc=True) \
+                            .limit(1) \
+                            .execute()
+                        
+                        if latest_resp.data:
+                            last_r = latest_resp.data[0]
+                            if last_r.get("needs_review") and last_r.get("handoff_at"):
+                                from datetime import datetime, timezone
+                                handoff_dt = datetime.fromisoformat(last_r["handoff_at"].replace('Z', '+00:00'))
+                                now_dt = datetime.now(timezone.utc)
+                                diff_hours = (now_dt - handoff_dt).total_seconds() / 3600.0
+                                if diff_hours < 24.0:
+                                    is_handoff = True
+                                    logger.info(
+                                        "conversational_skipped_due_to_active_handoff",
+                                        sender_jid=inbound.sender_jid,
+                                        handoff_age_hours=diff_hours,
+                                    )
+                    except Exception as handoff_exc:
+                        logger.warning("handoff_check_failed", error=str(handoff_exc))
+
+                    if not is_spam and not is_handoff:
+                        self._trigger_n8n_chat_interaction(
+                            school_id=resolved_school_id,
+                            sender_jid=inbound.sender_jid,
+                            response_id=response_id,
+                            student_id=student_id,
+                            text=inbound.text,
+                            received_at=inbound.timestamp.isoformat() if inbound.timestamp else None,
+                            push_name=inbound.push_name,
+                        )
+                    elif is_handoff:
+                        logger.info(
+                            "conversational_skipped_due_to_handoff_active",
+                            sender_jid=inbound.sender_jid,
+                            message_id=inbound.message_id,
+                        )
+                    else:
+                        logger.info(
+                            "conversational_skipped_due_to_debounce",
+                            sender_jid=inbound.sender_jid,
+                            message_id=inbound.message_id,
+                        )
+                else:
+                    logger.info(
+                        "conversational_skipped_agent_disabled",
+                        sender_jid=inbound.sender_jid,
+                        message_id=inbound.message_id,
+                    )
+
             self.repository.mark_raw_inbound_processed(
                 message_id=inbound.message_id,
                 processed=True,
@@ -327,3 +444,52 @@ class InboundService:
                 error_type=type(exc).__name__,
             )
             return False
+
+    def _trigger_n8n_chat_interaction(
+        self,
+        school_id: str,
+        sender_jid: str,
+        response_id: str,
+        student_id: str | None,
+        text: str,
+        received_at: str | None,
+        push_name: str | None = None,
+    ) -> bool:
+        """
+        Dispara webhook para o n8n para tratar a interação de chat conversacional.
+        """
+        if not settings.n8n_chat_webhook_url:
+            logger.warning("n8n_chat_webhook_url_not_configured")
+            return False
+
+        payload = {
+            "school_id": school_id,
+            "sender_jid": sender_jid,
+            "response_id": response_id,
+            "student_id": student_id,
+            "message_text": text or "",
+            "received_at": received_at,
+            "push_name": push_name,
+        }
+
+        try:
+            with httpx.Client(timeout=5.0) as client:
+                response = client.post(settings.n8n_chat_webhook_url, json=payload)
+                response.raise_for_status()
+                data = response.json()
+                logger.info(
+                    "n8n_chat_interaction_triggered",
+                    school_id=school_id,
+                    sender_jid=sender_jid,
+                    response=data,
+                )
+                return True
+        except Exception as exc:
+            logger.warning(
+                "n8n_chat_interaction_trigger_failed",
+                error=str(exc),
+                url=settings.n8n_chat_webhook_url,
+                school_id=school_id,
+            )
+            return False
+

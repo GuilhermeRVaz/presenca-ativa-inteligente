@@ -39,10 +39,15 @@ class CampaignAnalytics:
         )
 
         # 2. Buscar Dados de Outbound (Estruturais e Operacionais)
-        outbound_res = self.client.schema("busca_ativa_v2").table("messages") \
-            .select("status, student_id, last_error") \
-            .eq("campaign_id", campaign_id) \
-            .execute()
+        messages_query = self.client.schema("busca_ativa_v2").table("messages").select("status, student_id, last_error")
+        if isinstance(campaign_id, list):
+            messages_query = messages_query.in_("campaign_id", campaign_id)
+        elif isinstance(campaign_id, str) and "," in campaign_id:
+            campaign_ids = [c.strip() for c in campaign_id.split(",")]
+            messages_query = messages_query.in_("campaign_id", campaign_ids)
+        else:
+            messages_query = messages_query.eq("campaign_id", campaign_id)
+        outbound_res = messages_query.execute()
         
         messages = outbound_res.data
         total_targeted = len(messages)
@@ -99,13 +104,20 @@ class CampaignAnalytics:
         priority_cases = [r for r in reports if r.risk_level == RiskLevel.ALTO or r.needs_followup]
 
         # Buscar nome da campanha
-        campaign_info = self.client.schema("busca_ativa_v2").table("campaigns") \
-            .select("name") \
-            .eq("id", campaign_id) \
-            .single() \
-            .execute()
-        
-        campaign_name = campaign_info.data.get("name", "Campanha Desconhecida") if campaign_info.data else "Campanha"
+        if isinstance(campaign_id, list):
+            c_infos = self.client.schema("busca_ativa_v2").table("campaigns").select("name").in_("id", campaign_id).execute().data or []
+            campaign_name = " + ".join(c.get("name", "") for c in c_infos if c.get("name")) or "Campanha Combinada"
+        elif isinstance(campaign_id, str) and "," in campaign_id:
+            campaign_ids = [c.strip() for c in campaign_id.split(",")]
+            c_infos = self.client.schema("busca_ativa_v2").table("campaigns").select("name").in_("id", campaign_ids).execute().data or []
+            campaign_name = " + ".join(c.get("name", "") for c in c_infos if c.get("name")) or "Campanha Combinada"
+        else:
+            campaign_info = self.client.schema("busca_ativa_v2").table("campaigns") \
+                .select("name") \
+                .eq("id", campaign_id) \
+                .single() \
+                .execute()
+            campaign_name = campaign_info.data.get("name", "Campanha Desconhecida") if campaign_info.data else "Campanha"
 
         return ConsolidatedCampaignReport(
             campaign_id=campaign_id,

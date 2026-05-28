@@ -58,7 +58,13 @@ class ConversationBuilder:
         ).eq("school_id", school_id)
         
         if campaign_id:
-            query = query.eq("campaign_id", campaign_id)
+            if isinstance(campaign_id, list):
+                query = query.in_("campaign_id", campaign_id)
+            elif isinstance(campaign_id, str) and "," in campaign_id:
+                campaign_ids = [c.strip() for c in campaign_id.split(",")]
+                query = query.in_("campaign_id", campaign_ids)
+            else:
+                query = query.eq("campaign_id", campaign_id)
             
         # Busca todas as respostas
         res = query.order("received_at", desc=False).execute()

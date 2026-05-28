@@ -25,10 +25,12 @@ class Settings:
     project_root: Path = Path(__file__).resolve().parents[2]
     consolidated_report_path: str = os.getenv("CONSOLIDATED_REPORT_PATH", "relatorios/Relatorio_Consolidado_BuscaAtiva.xlsx").strip()
     n8n_webhook_url: str = os.getenv("N8N_WEBHOOK_URL", "http://localhost:5678/webhook/triagem").strip()
+    n8n_chat_webhook_url: str = os.getenv("N8N_CHAT_WEBHOOK_URL", "http://localhost:5678/webhook/chat-interaction").strip()
     openai_api_key: str = os.getenv("OPENAI_API_KEY", "").strip()
 
     # Feature Flags
     use_session_correlation: bool = os.getenv("USE_SESSION_CORRELATION", "true").lower() == "true"
+    enable_conversational_agent: bool = os.getenv("ENABLE_CONVERSATIONAL_AGENT", "true").lower() == "true"
 
 
 settings = Settings()

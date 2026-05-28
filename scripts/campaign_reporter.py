@@ -40,12 +40,15 @@ def _get_repository():
 
 
 def _find_latest_campaign(repo):
-    res = (repo.client.schema("busca_ativa_v2")
-           .table("campaigns")
-           .select("id, name, absence_days, created_at")
-           .order("created_at", desc=True)
-           .limit(1)
-           .execute())
+    operation = lambda: (
+        repo.client.schema("busca_ativa_v2")
+        .table("campaigns")
+        .select("id, name, absence_days, created_at")
+        .order("created_at", desc=True)
+        .limit(1)
+        .execute()
+    )
+    res = repo._execute_with_retry(operation, operation="find_latest_campaign")
     if not res.data:
         return None
     c = res.data[0]
@@ -58,14 +61,26 @@ def _find_latest_campaign(repo):
 
 
 def _get_campaign_info(repo, campaign_id):
-    res = (repo.client.schema("busca_ativa_v2")
-           .table("campaigns")
-           .select("name, absence_days")
-           .eq("id", campaign_id)
-           .execute())
+    if isinstance(campaign_id, list):
+        campaign_ids = campaign_id
+    elif isinstance(campaign_id, str) and "," in campaign_id:
+        campaign_ids = [c.strip() for c in campaign_id.split(",")]
+    else:
+        campaign_ids = [campaign_id]
+
+    operation = lambda: (
+        repo.client.schema("busca_ativa_v2")
+        .table("campaigns")
+        .select("name, absence_days")
+        .in_("id", campaign_ids)
+        .execute()
+    )
+    res = repo._execute_with_retry(operation, operation="get_campaign_info")
     if not res.data:
         return None
-    return {"name": res.data[0]["name"], "absence_days": res.data[0].get("absence_days", "")}
+    name = " + ".join(c["name"] for c in res.data if c.get("name"))
+    absence_days = res.data[0].get("absence_days", "")
+    return {"name": name, "absence_days": absence_days}
 
 
 def run_orchestrator(campaign_id=None, skip_backfill=False):
@@ -88,16 +103,43 @@ def run_orchestrator(campaign_id=None, skip_backfill=False):
         if not camp:
             print(f"{Colors.RED}ERRO: Nenhuma campanha encontrada no banco.{Colors.RESET}")
             return None
-        campaign_id = camp["id"]
-        campaign_name = camp["name"]
+        
         absence_days = camp["absence_days"]
+        # Buscar todas as campanhas da mesma data de falta para consolidar automaticamente
+        operation = lambda: (
+            repo.client.schema("busca_ativa_v2")
+            .table("campaigns")
+            .select("id, name")
+            .eq("absence_days", absence_days)
+            .execute()
+        )
+        same_day_camps = repo._execute_with_retry(operation, operation="find_same_day_campaigns")
+        same_day_data = same_day_camps.data or []
+        if len(same_day_data) > 1:
+            campaign_ids = [c["id"] for c in same_day_data]
+            campaign_name = " + ".join(c["name"] for c in same_day_data if c.get("name"))
+            campaign_id = ",".join(campaign_ids)
+            print(f"{Colors.GREEN}AUTO-CONSOLIDAÇÃO: Encontradas {len(campaign_ids)} campanhas para a data {absence_days}!{Colors.RESET}")
+        else:
+            campaign_id = camp["id"]
+            campaign_name = camp["name"]
+            campaign_ids = [campaign_id]
     else:
+        if isinstance(campaign_id, list):
+            campaign_ids = campaign_id
+        elif isinstance(campaign_id, str) and "," in campaign_id:
+            campaign_ids = [c.strip() for c in campaign_id.split(",")]
+        else:
+            campaign_ids = [campaign_id]
+
         info = _get_campaign_info(repo, campaign_id)
         if not info:
             print(f"{Colors.RED}ERRO: Campanha nao encontrada: {campaign_id}{Colors.RESET}")
             return None
         campaign_name = info["name"]
         absence_days = info["absence_days"]
+
+    campaign_short = campaign_ids[0][:8] if len(campaign_ids) == 1 else f"{campaign_ids[0][:8]}_combined"
 
     print("=" * 65)
     print(f"{Colors.BOLD}  RELATORIOS CONSOLIDADOS{Colors.RESET}")
@@ -138,7 +180,7 @@ def run_orchestrator(campaign_id=None, skip_backfill=False):
         exporter = ReportExporter()
         excel_bytes = exporter.to_excel_bytes(report)
         timestamp = datetime.now().strftime("%Y%m%d_%H%M")
-        excel_file = ROOT / "relatorios" / f"Relatorio_Executivo_{campaign_id[:8]}_{timestamp}.xlsx"
+        excel_file = ROOT / "relatorios" / f"Relatorio_Executivo_{campaign_short}_{timestamp}.xlsx"
         excel_file.parent.mkdir(exist_ok=True)
         excel_file.write_bytes(excel_bytes)
         print(f"{Colors.GREEN}  Excel: {excel_file}{Colors.RESET}")
@@ -180,7 +222,7 @@ def run_orchestrator(campaign_id=None, skip_backfill=False):
         client = make_client()
         markdown = build_report(client, campaign_id)
         camp_date = datetime.now().strftime("%d_%m_%Y")
-        stem = f"relatorio_completo_{camp_date}_{campaign_id[:8]}"
+        stem = f"relatorio_completo_{camp_date}_{campaign_short}"
         out_dir = ROOT / "relatorios" / "campanhas_v2"
         write_outputs(out_dir, stem, markdown)
         print(f"{Colors.GREEN}  MD:  {out_dir / f'{stem}.md'}{Colors.RESET}")

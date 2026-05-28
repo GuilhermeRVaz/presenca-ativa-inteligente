@@ -530,9 +530,13 @@ class SupabaseRepository:
         reason: str | None = None,
         ai_confidence: float | None = None,
         received_at: Any = None,
+        needs_review: bool | None = None,
+        handoff_reason: str | None = None,
+        detected_intent: str | None = None,
+        risk_level: str | None = None,
     ) -> tuple[str, bool]:
         """
-        Grava uma resposta de responsável na tabela `responses` com suporte a `reason`.
+        Grava uma resposta de responsável na tabela `responses` com suporte a `reason` e handoff.
         Retorna (response_id, message_was_marked_replied).
         """
         row: dict[str, Any] = {
@@ -557,6 +561,16 @@ class SupabaseRepository:
                 if hasattr(received_at, "isoformat")
                 else received_at
             )
+        if needs_review is not None:
+            row["needs_review"] = needs_review
+            if needs_review:
+                row["handoff_at"] = datetime.now(timezone.utc).isoformat()
+        if handoff_reason:
+            row["handoff_reason"] = handoff_reason
+        if detected_intent:
+            row["detected_intent"] = detected_intent
+        if risk_level:
+            row["risk_level"] = risk_level
 
         self._execute_with_retry(
             lambda: (
@@ -596,6 +610,43 @@ class SupabaseRepository:
             marked_replied = True
 
         return response_id, marked_replied
+
+    def set_human_takeover(self, *, school_id: str, sender_jid: str) -> None:
+        """
+        Marca que um atendimento humano assumiu a conversa, setando needs_review = True
+        e handoff_at = agora na última resposta registrada.
+        """
+        # Primeiro, buscamos a resposta mais recente
+        resp = self._execute_with_retry(
+            lambda: (
+                self.client.schema("busca_ativa_v2")
+                .table("responses")
+                .select("id")
+                .eq("school_id", school_id)
+                .eq("sender_jid", sender_jid)
+                .order("received_at", desc=True)
+                .limit(1)
+                .execute()
+            ),
+            operation="get latest response for human takeover"
+        )
+            
+        if resp.data:
+            latest_id = resp.data[0]["id"]
+            self._execute_with_retry(
+                lambda: (
+                    self.client.schema("busca_ativa_v2")
+                    .table("responses")
+                    .update({
+                        "needs_review": True,
+                        "handoff_at": datetime.now(timezone.utc).isoformat(),
+                        "handoff_reason": "human_reply"
+                    })
+                    .eq("id", latest_id)
+                    .execute()
+                ),
+                operation="update response for human takeover"
+            )
 
     def get_outbound_context(
         self,
@@ -734,6 +785,293 @@ class SupabaseRepository:
             raise RuntimeError("Supabase RPC upsert_phone_identity returned no data")
         return str(response.data)
 
+    def save_ai_interaction(
+        self,
+        *,
+        response_id: str | None,
+        student_id: str | None,
+        prompt_version: str,
+        model: str,
+        input_text: str,
+        output_text: str,
+        classified_reason: str | None = None,
+        risk_level: str | None = None,
+        tokens_input: int | None = None,
+        tokens_output: int | None = None,
+        cost: float | None = None,
+    ) -> str:
+        row: dict[str, Any] = {
+            "prompt_version": prompt_version,
+            "model": model,
+            "input_text": input_text,
+            "output_text": output_text,
+        }
+        if response_id:
+            row["response_id"] = response_id
+        if student_id:
+            row["student_id"] = student_id
+        if classified_reason:
+            row["classified_reason"] = classified_reason
+        if risk_level:
+            row["risk_level"] = risk_level
+        if tokens_input is not None:
+            row["tokens_input"] = tokens_input
+        if tokens_output is not None:
+            row["tokens_output"] = tokens_output
+        if cost is not None:
+            row["cost"] = cost
+
+        def operation():
+            return (
+                self.client.schema("busca_ativa_v2")
+                .table("ai_interactions")
+                .insert(row)
+                .execute()
+            )
+
+        response = self._execute_with_retry(operation, operation="save_ai_interaction")
+        return str(self._require_data(response, "save_ai_interaction")[0]["id"])
+
+    def get_conversation_context(
+        self,
+        *,
+        school_id: str,
+        sender_jid: str,
+        limit: int = 5,
+    ) -> dict[str, Any]:
+        import concurrent.futures
+        import logging
+        logger = logging.getLogger(__name__)
+
+        wa_jids = [sender_jid]
+        guardian_id = None
+        student_id = None
+        student_name = None
+        last_reason = None
+        status = "active"
+
+        # Batch 1 functions to run in parallel
+        def get_map():
+            query = (
+                self.client.schema("busca_ativa_v2")
+                .table("phone_identity_map")
+                .select("wa_jid, guardian_id")
+                .eq("school_id", school_id)
+            )
+            if sender_jid.endswith("@lid"):
+                query = query.eq("lid_jid", sender_jid)
+            else:
+                query = query.eq("wa_jid", sender_jid)
+            return query.limit(1).execute()
+
+        def get_session():
+            return (
+                self.client.schema("busca_ativa_v2")
+                .table("conversation_sessions")
+                .select("student_id, resolved, campaign_id")
+                .eq("school_id", school_id)
+                .eq("sender_jid", sender_jid)
+                .limit(1)
+                .execute()
+            )
+
+        # Consolidate all responses queries for JID (student_id fallback, last_reason, and inbounds) into one!
+        def get_all_responses_by_jid():
+            return (
+                self.client.schema("busca_ativa_v2")
+                .table("responses")
+                .select("student_id, reason, body, received_at")
+                .eq("school_id", school_id)
+                .eq("sender_jid", sender_jid)
+                .order("received_at", desc=True)
+                .execute()
+            )
+
+        def get_active_campaign():
+            try:
+                return self.get_active_campaign_for_today(school_id=school_id)
+            except Exception:
+                return None
+
+        # Execute Batch 1 in parallel
+        with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
+            future_map = executor.submit(self._execute_with_retry, get_map, operation="get_conversation_context_identity")
+            future_session = executor.submit(self._execute_with_retry, get_session, operation="get_conversation_context_session")
+            future_responses = executor.submit(self._execute_with_retry, get_all_responses_by_jid, operation="get_conversation_context_responses")
+            future_active_camp = executor.submit(get_active_campaign)
+
+            map_res = future_map.result()
+            session_res = future_session.result()
+            responses_res = future_responses.result()
+            active_campaign_id = future_active_camp.result()
+
+        # Parse Batch 1 results
+        if map_res.data:
+            mapped_wa = map_res.data[0].get("wa_jid")
+            if mapped_wa and mapped_wa not in wa_jids:
+                wa_jids.append(mapped_wa)
+            guardian_id = map_res.data[0].get("guardian_id")
+
+        campaign_id = None
+        if session_res.data:
+            student_id = session_res.data[0].get("student_id")
+            campaign_id = session_res.data[0].get("campaign_id")
+            resolved = session_res.data[0].get("resolved")
+            if resolved:
+                status = "resolved"
+
+        if not campaign_id:
+            campaign_id = active_campaign_id
+
+        responses_data = responses_res.data or []
+
+        # Extract student_id from responses if not in session
+        if not student_id:
+            for r in responses_data:
+                if r.get("student_id") is not None:
+                    student_id = r.get("student_id")
+                    break
+
+        # Extract last_reason by JID (fallback)
+        last_reason_by_jid = None
+        for r in responses_data:
+            if r.get("reason") is not None:
+                last_reason_by_jid = r.get("reason")
+                break
+
+        # Process inbound messages
+        inbound_msgs = []
+        for r in responses_data[:limit]:
+            inbound_msgs.append({
+                "text": r.get("body"),
+                "sender": "guardian",
+                "timestamp": r.get("received_at"),
+            })
+
+        # Batch 2: Get name, campaign details, outbounds, and last reason by student_id in parallel
+        campaign_name = None
+        campaign_absence_days = None
+
+        def safe_get_campaign_details():
+            if not campaign_id:
+                return None
+            try:
+                return (
+                    self.client.schema("busca_ativa_v2")
+                    .table("campaigns")
+                    .select("name, absence_days")
+                    .eq("school_id", school_id)
+                    .eq("id", campaign_id)
+                    .limit(1)
+                    .execute()
+                )
+            except Exception as exc:
+                logger.warning("get_campaign_details_failed", error=str(exc))
+                return None
+
+        def safe_get_student_name():
+            if not student_id:
+                return None
+            try:
+                return (
+                    self.client.schema("busca_ativa_v2")
+                    .table("students")
+                    .select("name")
+                    .eq("school_id", school_id)
+                    .eq("id", student_id)
+                    .limit(1)
+                    .execute()
+                )
+            except Exception as exc:
+                logger.warning("get_student_name_failed", error=str(exc))
+                return None
+
+        def safe_get_last_reason_by_student():
+            if not student_id:
+                return None
+            try:
+                return (
+                    self.client.schema("busca_ativa_v2")
+                    .table("responses")
+                    .select("reason")
+                    .eq("school_id", school_id)
+                    .eq("student_id", student_id)
+                    .not_.is_("reason", "null")
+                    .order("received_at", desc=True)
+                    .limit(1)
+                    .execute()
+                )
+            except Exception as exc:
+                logger.warning("get_last_reason_by_student_failed", error=str(exc))
+                return None
+
+        def get_outbounds():
+            query = (
+                self.client.schema("busca_ativa_v2")
+                .table("messages")
+                .select("body_preview, sent_at")
+                .eq("school_id", school_id)
+                .not_.is_("sent_at", "null")
+            )
+            if guardian_id:
+                query = query.eq("guardian_id", guardian_id)
+            else:
+                query = query.in_("wa_jid", wa_jids)
+            return query.order("sent_at", desc=True).limit(limit).execute()
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
+            future_camp_details = executor.submit(safe_get_campaign_details)
+            future_student_name = executor.submit(safe_get_student_name)
+            future_student_reason = executor.submit(safe_get_last_reason_by_student)
+            future_outbounds = executor.submit(self._execute_with_retry, get_outbounds, operation="get_outbound_messages")
+
+            camp_res = future_camp_details.result()
+            stu_res = future_student_name.result()
+            reason_res = future_student_reason.result()
+            outbound_res = future_outbounds.result()
+
+        # Parse Batch 2 results
+        if camp_res and camp_res.data:
+            campaign_name = camp_res.data[0].get("name")
+            campaign_absence_days = camp_res.data[0].get("absence_days")
+
+        if stu_res and stu_res.data:
+            student_name = stu_res.data[0].get("name")
+
+        if reason_res and reason_res.data:
+            last_reason = reason_res.data[0].get("reason")
+
+        if not last_reason:
+            last_reason = last_reason_by_jid
+
+        outbound_msgs = []
+        for m in (outbound_res.data or []):
+            outbound_msgs.append({
+                "text": m.get("body_preview"),
+                "sender": "bot",
+                "timestamp": m.get("sent_at"),
+            })
+
+        # Fundir e ordenar por timestamp decrescente, pegar os últimos 'limit' e depois inverter para ficar cronológico
+        all_msgs = inbound_msgs + outbound_msgs
+        all_msgs = [m for m in all_msgs if m.get("timestamp")]
+        all_msgs.sort(key=lambda x: str(x.get("timestamp")), reverse=True)
+        
+        last_msgs = all_msgs[:limit]
+        last_msgs.reverse()
+
+        return {
+            "student_name": student_name,
+            "last_reason": last_reason,
+            "status": status,
+            "campaign_id": campaign_id,
+            "campaign_name": campaign_name,
+            "campaign_absence_days": campaign_absence_days,
+            "messages": last_msgs,
+        }
+
+
+
     @staticmethod
     def _guardian(row: dict[str, Any] | None) -> GuardianRecord | None:
         if not row:
@@ -820,7 +1158,7 @@ class SupabaseRepository:
 
     @staticmethod
     def _execute_with_retry(
-        operation_call: Any, *, operation: str, attempts: int = 3
+        operation_call: Any, *, operation: str, attempts: int = 5
     ) -> Any:
         last_error: Exception | None = None
         for attempt in range(1, attempts + 1):

@@ -1,0 +1,261 @@
+{
+  "name": "Busca Ativa - Chat Conversacional (Fase 1: Confirmacao Empatica)",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "chat-interaction",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "webhook-node",
+      "name": "Webhook Chat",
+      "type": "n8n-nodes-base.webhook",
+      "position": [100, 300],
+      "webhookId": "chat-interaction"
+    },
+    {
+      "parameters": {
+        "url": "=http://localhost:8000/students/session_context",
+        "method": "GET",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "sender_jid",
+              "value": "={{ $json.sender_jid }}"
+            },
+            {
+              "name": "school_id",
+              "value": "={{ $json.school_id }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "get-session-context",
+      "name": "GET Session Context",
+      "type": "n8n-nodes-base.httpRequest",
+      "position": [300, 300]
+    },
+    {
+      "parameters": {
+        "url": "https://api.openai.com/v1/chat/completions",
+        "method": "POST",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{ $env.OPENAI_API_KEY }}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "bodyContentType": "json",
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"model\": \"gpt-4o-mini\",\n  \"messages\": [\n    {\n      \"role\": \"system\",\n      \"content\": \"Você é a PAI (Presença Ativa Inteligente), assistente virtual de busca ativa escolar da escola.\\nO seu objetivo nesta fase (Fase 1: Confirmação Empática) é responder ao responsável do aluno de forma breve, acolhedora e empática, confirmando que a justificativa foi registrada.\\n\\nRegras cruciais:\\n1. Seja extremamente conciso(a). Responda com no máximo de 2 frases curtas.\\n2. NÃO tente prolongar a conversa nem fazer novas perguntas ou propor novos temas.\\n3. Use o nome do aluno se estiver disponível no contexto. Se não estiver, trate genericamente (ex: 'o aluno' ou 'seu filho').\\n4. Adapte sua empatia ao último motivo de falta registrado (`last_reason`). Exemplos:\\n   - ILLNESS (Doença): 'Desejamos melhoras rápidas ao [Nome do Aluno]. A justificativa foi registrada com sucesso.'\\n   - WORK (Trabalho) / FAMILY (Problemas familiares): 'Entendemos a situação. A justificativa foi registrada e a escola está à disposição.'\\n   - Outros: 'Agradecemos o retorno. A justificativa foi registrada.'\\n5. Sempre retorne a resposta no formato JSON válido:\\n{\\n  \\\"response_text\\\": \\\"Texto empático de resposta\\\",\\n  \\\"prompt_version\\\": \\\"1.0-empatia-fase1\\\",\\n  \\\"classified_reason\\\": \\\"classificação extraída (ex: ILLNESS, WORK, etc.)\\\",\\n  \\\"risk_level\\\": \\\"LOW/MEDIUM/HIGH com base em desânimo/recorrência\\\"\\n}\"\n    },\n    {\n      \"role\": \"user\",\n      \"content\": \"Informações do Contexto:\\n- Nome do Aluno: {{ $node[\\\"GET Session Context\\\"].json.student_name || \\\"não identificado\\\" }}\\n- Último Motivo de Falta Registrado: {{ $node[\\\"GET Session Context\\\"].json.last_reason || \\\"não informado\\\" }}\\n- Status do Caso: {{ $node[\\\"GET Session Context\\\"].json.status }}\\n- Histórico de Mensagens Recentes:\\n{{ JSON.stringify($node[\\\"GET Session Context\\\"].json.messages, null, 2) }}\\n\\nResponda agora ao responsável de acordo com as regras especificadas no prompt do sistema.\"\n    }\n  ],\n  \"response_format\": { \"type\": \"json_object\" }\n}",
+        "options": {}
+      },
+      "id": "openai-chat",
+      "name": "OpenAI Chat",
+      "type": "n8n-nodes-base.httpRequest",
+      "position": [500, 300]
+    },
+    {
+      "parameters": {
+        "values": {
+          "string": [
+            {
+              "name": "response_text",
+              "value": "={{ JSON.parse($json.choices[0].message.content).response_text }}"
+            },
+            {
+              "name": "prompt_version",
+              "value": "={{ JSON.parse($json.choices[0].message.content).prompt_version }}"
+            },
+            {
+              "name": "classified_reason",
+              "value": "={{ JSON.parse($json.choices[0].message.content).classified_reason }}"
+            },
+            {
+              "name": "risk_level",
+              "value": "={{ JSON.parse($json.choices[0].message.content).risk_level }}"
+            },
+            {
+              "name": "model",
+              "value": "gpt-4o-mini"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "parse-ai-output",
+      "name": "Parse AI Output",
+      "type": "n8n-nodes-base.set",
+      "position": [700, 300]
+    },
+    {
+      "parameters": {
+        "url": "http://localhost:8000/inbound/ai_interaction",
+        "method": "POST",
+        "sendBody": true,
+        "bodyContentType": "json",
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"response_id\": \"{{ $node[\\\"Webhook Chat\\\"].json.response_id || null }}\",\n  \"student_id\": \"{{ $node[\\\"Webhook Chat\\\"].json.student_id || null }}\",\n  \"prompt_version\": \"{{ $json.prompt_version }}\",\n  \"model\": \"{{ $json.model }}\",\n  \"input_text\": \"{{ $node[\\\"GET Session Context\\\"].json.messages ? $node[\\\"GET Session Context\\\"].json.messages.map(m => m.sender + ': ' + m.text).join('\\\\n') : '' }}\",\n  \"output_text\": \"{{ $json.response_text }}\",\n  \"classified_reason\": \"{{ $json.classified_reason || null }}\",\n  \"risk_level\": \"{{ $json.risk_level || null }}\",\n  \"tokens_input\": {{ $node[\\\"OpenAI Chat\\\"].json.usage.prompt_tokens || 0 }},\n  \"tokens_output\": {{ $node[\\\"OpenAI Chat\\\"].json.usage.completion_tokens || 0 }},\n  \"cost\": {{ ($node[\\\"OpenAI Chat\\\"].json.usage.prompt_tokens || 0) * 0.00000015 + ($node[\\\"OpenAI Chat\\\"].json.usage.completion_tokens || 0) * 0.0000006 }}\n}",
+        "options": {}
+      },
+      "id": "post-ai-interaction",
+      "name": "POST AI Interaction",
+      "type": "n8n-nodes-base.httpRequest",
+      "position": [900, 300]
+    },
+    {
+      "parameters": {
+        "url": "=http://localhost:8080/message/sendText/{{ $env.EVOLUTION_API_INSTANCE }}",
+        "method": "POST",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "apikey",
+              "value": "={{ $env.EVOLUTION_API_KEY }}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "bodyContentType": "json",
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"number\": \"{{ $node[\\\"Webhook Chat\\\"].json.sender_jid.endsWith('@lid') ? $node[\\\"Webhook Chat\\\"].json.sender_jid : $node[\\\"Webhook Chat\\\"].json.sender_jid.split('@')[0] }}\",\n  \"text\": \"{{ $node[\\\"Parse AI Output\\\"].json.response_text }}\"\n}",
+        "options": {}
+      },
+      "id": "evolution-send",
+      "name": "Evolution API Send",
+      "type": "n8n-nodes-base.httpRequest",
+      "position": [1100, 300]
+    },
+    {
+      "parameters": {
+        "values": {
+          "string": [
+            {
+              "name": "status",
+              "value": "success"
+            },
+            {
+              "name": "message",
+              "value": "Resposta empática enviada e registrada."
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "set-response",
+      "name": "Set Response",
+      "type": "n8n-nodes-base.set",
+      "position": [1300, 300]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ $node[\"Set Response\"].json }}",
+        "options": {}
+      },
+      "id": "respond-to-webhook",
+      "name": "Respond to Webhook",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "position": [1500, 300]
+    }
+  ],
+  "connections": {
+    "Webhook Chat": {
+      "main": [
+        [
+          {
+            "node": "GET Session Context",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "GET Session Context": {
+      "main": [
+        [
+          {
+            "node": "OpenAI Chat",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "OpenAI Chat": {
+      "main": [
+        [
+          {
+            "node": "Parse AI Output",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse AI Output": {
+      "main": [
+        [
+          {
+            "node": "POST AI Interaction",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "POST AI Interaction": {
+      "main": [
+        [
+          {
+            "node": "Evolution API Send",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Evolution API Send": {
+      "main": [
+        [
+          {
+            "node": "Set Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Set Response": {
+      "main": [
+        [
+          {
+            "node": "Respond to Webhook",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "staticData": null
+}

@@ -40,7 +40,13 @@ class ConversationReconciler:
             if school_id:
                 responses_query = responses_query.eq("school_id", school_id)
             if campaign_id:
-                responses_query = responses_query.eq("campaign_id", campaign_id)
+                if isinstance(campaign_id, list):
+                    responses_query = responses_query.in_("campaign_id", campaign_id)
+                elif isinstance(campaign_id, str) and "," in campaign_id:
+                    campaign_ids = [c.strip() for c in campaign_id.split(",")]
+                    responses_query = responses_query.in_("campaign_id", campaign_ids)
+                else:
+                    responses_query = responses_query.eq("campaign_id", campaign_id)
             responses_query = responses_query.execute()
 
             unresolved = responses_query.data or []
@@ -168,7 +174,13 @@ class ConversationReconciler:
         if school_id:
             query = query.eq("school_id", school_id)
         if campaign_id:
-            query = query.eq("campaign_id", campaign_id)
+            if isinstance(campaign_id, list):
+                query = query.in_("campaign_id", campaign_id)
+            elif isinstance(campaign_id, str) and "," in campaign_id:
+                campaign_ids = [c.strip() for c in campaign_id.split(",")]
+                query = query.in_("campaign_id", campaign_ids)
+            else:
+                query = query.eq("campaign_id", campaign_id)
         if guardian_id:
             query = query.eq("guardian_id", guardian_id)
         else:

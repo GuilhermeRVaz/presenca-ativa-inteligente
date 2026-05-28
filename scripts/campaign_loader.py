@@ -106,6 +106,24 @@ def _build_supabase_client():
     return create_client(settings.supabase_url, settings.supabase_key, options=options)
 
 
+import time
+from typing import Any
+
+def _execute_with_retry(operation_call: Any, *, operation: str, attempts: int = 5) -> Any:
+    last_error: Exception | None = None
+    for attempt in range(1, attempts + 1):
+        try:
+            return operation_call()
+        except Exception as exc:
+            last_error = exc
+            if attempt >= attempts:
+                break
+            time.sleep(2**attempt)
+    raise RuntimeError(
+        f"Supabase {operation} failed after {attempts} attempts: {last_error!r}"
+    ) from last_error
+
+
 def _resolve_student_uuid(client, school_id: str, ra: str, name: str) -> str | None:
     """
     Resolve o UUID do aluno:
@@ -116,7 +134,7 @@ def _resolve_student_uuid(client, school_id: str, ra: str, name: str) -> str | N
     # Tentativa 1: por RA
     ra_clean = str(ra).strip()
     if ra_clean and ra_clean.lower() not in ("nan", "none", ""):
-        res = (
+        operation = lambda: (
             client.schema("busca_ativa_v2")
             .table("students")
             .select("id")
@@ -125,13 +143,14 @@ def _resolve_student_uuid(client, school_id: str, ra: str, name: str) -> str | N
             .limit(1)
             .execute()
         )
+        res = _execute_with_retry(operation, operation="resolve_student_by_ra")
         if res.data:
             return str(res.data[0]["id"])
 
     # Tentativa 2: por Nome
     name_clean = str(name).strip()
     if name_clean and name_clean.lower() not in ("nan", "none", ""):
-        res = (
+        operation = lambda: (
             client.schema("busca_ativa_v2")
             .table("students")
             .select("id")
@@ -140,6 +159,7 @@ def _resolve_student_uuid(client, school_id: str, ra: str, name: str) -> str | N
             .limit(1)
             .execute()
         )
+        res = _execute_with_retry(operation, operation="resolve_student_by_name")
         if res.data:
             return str(res.data[0]["id"])
 
@@ -148,7 +168,7 @@ def _resolve_student_uuid(client, school_id: str, ra: str, name: str) -> str | N
 
 def _resolve_primary_guardian(client, student_id: str) -> dict | None:
     """Retorna o responsável principal (is_primary=True) vinculado ao aluno."""
-    res = (
+    operation = lambda: (
         client.schema("busca_ativa_v2")
         .table("student_guardians")
         .select("guardian_id, guardians(id, name, phone_e164, wa_jid)")
@@ -157,6 +177,7 @@ def _resolve_primary_guardian(client, student_id: str) -> dict | None:
         .limit(1)
         .execute()
     )
+    res = _execute_with_retry(operation, operation="resolve_primary_guardian")
     if res.data and res.data[0].get("guardians"):
         return res.data[0]["guardians"]
     return None
@@ -178,7 +199,7 @@ def _create_campaign(client, school_id: str, day: int, month: int, year: int, to
         return fake_uuid
 
     # Verifica se já existe para evitar duplicação
-    existing = (
+    operation_exist = lambda: (
         client.schema("busca_ativa_v2")
         .table("campaigns")
         .select("id")
@@ -187,12 +208,13 @@ def _create_campaign(client, school_id: str, day: int, month: int, year: int, to
         .limit(1)
         .execute()
     )
+    existing = _execute_with_retry(operation_exist, operation="check_existing_campaign")
     if existing.data:
         campaign_id = str(existing.data[0]["id"])
         logger.warning("Campanha já existente — reutilizando", campaign_id=campaign_id, name=campaign_name)
         return campaign_id
 
-    res = (
+    operation_insert = lambda: (
         client.schema("busca_ativa_v2")
         .table("campaigns")
         .insert({
@@ -206,6 +228,7 @@ def _create_campaign(client, school_id: str, day: int, month: int, year: int, to
         })
         .execute()
     )
+    res = _execute_with_retry(operation_insert, operation="create_campaign")
     if not res.data:
         raise RuntimeError(f"Falha ao criar campanha: resposta vazia do Supabase")
     campaign_id = str(res.data[0]["id"])
@@ -240,7 +263,7 @@ def _enqueue_message(
         return tracking_ref
 
     # Verifica idempotência: não duplicar
-    existing = (
+    operation_exist = lambda: (
         client.schema("busca_ativa_v2")
         .table("messages")
         .select("id")
@@ -249,6 +272,7 @@ def _enqueue_message(
         .limit(1)
         .execute()
     )
+    existing = _execute_with_retry(operation_exist, operation="check_existing_message")
     if existing.data:
         logger.warning(
             "Aluno já enfileirado — pulando",
@@ -269,12 +293,13 @@ def _enqueue_message(
         "metadata": metadata,
     }
 
-    res = (
+    operation_insert = lambda: (
         client.schema("busca_ativa_v2")
         .table("messages")
         .insert(row)
         .execute()
     )
+    res = _execute_with_retry(operation_insert, operation="enqueue_message")
     if not res.data:
         raise RuntimeError(f"Falha ao enfileirar mensagem para student_id={student_id}")
     return str(res.data[0]["id"])

@@ -307,8 +307,15 @@ def run_consolidate(campaign_id: str, school_id: str) -> dict:
     repo = SupabaseRepository()
     client = repo.client.schema(SCHEMA)
 
-    c_rows = client.table("campaigns").select("id, name, absence_days").eq("id", campaign_id).execute().data
-    campaign_name = c_rows[0]["name"] if c_rows else "Campanha Desconhecida"
+    if isinstance(campaign_id, list):
+        campaign_ids = campaign_id
+    elif isinstance(campaign_id, str) and "," in campaign_id:
+        campaign_ids = [c.strip() for c in campaign_id.split(",")]
+    else:
+        campaign_ids = [campaign_id]
+
+    c_rows = client.table("campaigns").select("id, name, absence_days").in_("id", campaign_ids).execute().data or []
+    campaign_name = " + ".join(c["name"] for c in c_rows if c.get("name")) or "Campanha Desconhecida"
     absence_days_str = c_rows[0]["absence_days"] if c_rows else date.today().strftime("%d/%m/%Y")
 
     try:
@@ -323,16 +330,18 @@ def run_consolidate(campaign_id: str, school_id: str) -> dict:
         identity_map[row["lid_jid"]] = row["wa_jid"]
 
     # 2. Pegar TODAS as mensagens e respostas da campanha + respostas órfãs de hoje
-    all_msgs = client.table("messages").select("*, students(*), guardians(*)").eq("campaign_id", campaign_id).execute().data or []
+    all_msgs = client.table("messages").select("*, students(*), guardians(*)").in_("campaign_id", campaign_ids).execute().data or []
     
     # Busca ampla de respostas: da campanha OU do dia da campanha (para pegar follow-ups manuais/outros)
     campaign_date_iso = campaign_date.isoformat()
-    all_resps_raw = client.table("responses").select("*").or_(f"campaign_id.eq.{campaign_id},received_at.gte.{campaign_date_iso}T00:00:00+00:00").execute().data or []
+    
+    or_filters = [f"campaign_id.in.({','.join(campaign_ids)})", f"received_at.gte.{campaign_date_iso}T00:00:00+00:00"]
+    all_resps_raw = client.table("responses").select("*").or_(",".join(or_filters)).execute().data or []
     
     # Filtrar respostas em memoria para garantir que sao da campanha ou da mesma data
     all_resps = []
     for r in all_resps_raw:
-        if r.get("campaign_id") == campaign_id:
+        if r.get("campaign_id") in campaign_ids:
             all_resps.append(r)
             continue
         rx_at_str = r.get("received_at")
@@ -579,7 +588,8 @@ def run_consolidate(campaign_id: str, school_id: str) -> dict:
     # Salvar
     out_dir = ROOT_DIR / "relatorios" / "consolidados"
     out_dir.mkdir(parents=True, exist_ok=True)
-    file_stem = f"auditoria_{campaign_date.isoformat()}_{campaign_id[:8]}"
+    campaign_short = campaign_ids[0][:8] if len(campaign_ids) == 1 else f"{campaign_ids[0][:8]}_combined"
+    file_stem = f"auditoria_{campaign_date.isoformat()}_{campaign_short}"
     
     (out_dir / f"{file_stem}.txt").write_text("\n".join(txt_lines), encoding="utf-8")
     (out_dir / f"{file_stem}.md").write_text("\n".join(md_lines), encoding="utf-8")
@@ -595,7 +605,8 @@ def run_consolidate(campaign_id: str, school_id: str) -> dict:
         "justificaram": reason_total,
         "sem_resposta": len(final_blocks) - responded_total,
         "evolution_encontrados": evo_responded,
-        "arquivos": [f"{file_stem}.txt", f"{file_stem}.md"]
+        "arquivos": [f"{file_stem}.txt", f"{file_stem}.md"],
+        "final_blocks": final_blocks
     }
 
 def main():

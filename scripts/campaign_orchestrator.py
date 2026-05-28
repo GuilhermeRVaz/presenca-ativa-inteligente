@@ -34,6 +34,8 @@ sys.path.insert(0, str(ROOT))
 from app.core.config import settings
 from app.infrastructure.evolution.gateway import EvolutionGateway
 from app.infrastructure.message_catalog import MessageCatalog
+from app.infrastructure.followup_message_catalog import FollowupMessageCatalog
+
 
 
 MIN_DELAY = 45
@@ -178,14 +180,16 @@ def _message_status_counts(client, campaign_id: str) -> dict[str, int]:
 async def run_orchestrator(campaign_id: str | None, dry_run: bool = False) -> None:
     client = _build_supabase_client()
     gateway = EvolutionGateway()
-    catalog = MessageCatalog(school_name=settings.school_name)
+
+    campaign_type = "primary"
+    parent_campaign_id = None
 
     if not campaign_id:
         print(f"{Colors.CYAN}Buscando a campanha 'draft' ou 'dispatching' mais recente...{Colors.RESET}")
         res = _execute_with_retry(
             lambda: client.schema("busca_ativa_v2")
             .table("campaigns")
-            .select("id, name")
+            .select("id, name, campaign_type, parent_campaign_id")
             .in_("status", ["draft", "dispatching"])
             .order("created_at", desc=True)
             .limit(1),
@@ -196,10 +200,32 @@ async def run_orchestrator(campaign_id: str | None, dry_run: bool = False) -> No
             return
         campaign_id = str(res.data[0]["id"])
         campaign_name = res.data[0]["name"]
+        campaign_type = res.data[0].get("campaign_type") or "primary"
+        parent_campaign_id = res.data[0].get("parent_campaign_id")
         print(f"{Colors.GREEN}Campanha selecionada: {campaign_name} ({campaign_id}){Colors.RESET}")
     else:
-        campaign_name = f"ID: {campaign_id}"
-        print(f"{Colors.GREEN}Usando campanha informada: {campaign_id}{Colors.RESET}")
+        res = _execute_with_retry(
+            lambda: client.schema("busca_ativa_v2")
+            .table("campaigns")
+            .select("id, name, campaign_type, parent_campaign_id")
+            .eq("id", campaign_id)
+            .limit(1),
+            label="buscar detalhes da campanha",
+        )
+        if not res.data:
+            print(f"{Colors.RED}Campanha com ID {campaign_id} não encontrada.{Colors.RESET}")
+            return
+        campaign_name = res.data[0]["name"]
+        campaign_type = res.data[0].get("campaign_type") or "primary"
+        parent_campaign_id = res.data[0].get("parent_campaign_id")
+        print(f"{Colors.GREEN}Usando campanha informada: {campaign_name} ({campaign_id}){Colors.RESET}")
+
+    if campaign_type == "followup":
+        catalog = FollowupMessageCatalog(school_name=settings.school_name)
+        print(f"{Colors.GREEN}[INFO] Catálogo ativado: FollowupMessageCatalog (Tipo: {campaign_type}){Colors.RESET}")
+    else:
+        catalog = MessageCatalog(school_name=settings.school_name)
+        print(f"{Colors.GREEN}[INFO] Catálogo ativado: MessageCatalog (Tipo: {campaign_type}){Colors.RESET}")
 
     if dry_run:
         print(f"{Colors.YELLOW}MODO DRY RUN ATIVADO - NENHUMA MENSAGEM REAL SERA ENVIADA{Colors.RESET}")
@@ -213,6 +239,7 @@ async def run_orchestrator(campaign_id: str | None, dry_run: bool = False) -> No
             label="marcar campanha como dispatching",
         )
 
+
     print(f"\n{'-' * 60}\nIniciando consumo da fila...\n{'-' * 60}")
 
     total_processed = 0
@@ -223,7 +250,7 @@ async def run_orchestrator(campaign_id: str | None, dry_run: bool = False) -> No
         res = _execute_with_retry(
             lambda: client.schema("busca_ativa_v2")
             .table("messages")
-            .select("id, wa_jid, tracking_ref, metadata, student_id, guardian_id")
+            .select("id, wa_jid, tracking_ref, metadata, student_id, guardian_id, origin_message_id")
             .eq("campaign_id", campaign_id)
             .eq("status", "pending")
             .order("created_at", desc=False)
@@ -239,9 +266,38 @@ async def run_orchestrator(campaign_id: str | None, dry_run: bool = False) -> No
         msg_id = msg["id"]
         wa_jid = msg.get("wa_jid")
         tracking_ref = msg["tracking_ref"]
+        origin_msg_id = msg.get("origin_message_id")
         meta = msg.get("metadata") or {}
         student_name = meta.get("nome_excel", "Aluno(a)")
         total_processed += 1
+
+        # Revalidação em Tempo Real (Não enviar se já houver resposta no primeiro contato)
+        if campaign_type == "followup" and parent_campaign_id:
+            replied_check = _execute_with_retry(
+                lambda: client.schema("busca_ativa_v2")
+                .table("messages")
+                .select("id")
+                .eq("campaign_id", parent_campaign_id)
+                .eq("student_id", msg["student_id"])
+                .eq("status", "replied")
+                .limit(1),
+                label="revalidar resposta do primeiro contato",
+            )
+            if replied_check.data:
+                print(f"{Colors.YELLOW}[SKIPPED]{Colors.RESET} Aluno {student_name} - Já respondeu no primeiro contato. Pulando follow-up.")
+                if not dry_run:
+                    _execute_with_retry(
+                        lambda: client.schema("busca_ativa_v2")
+                        .table("messages")
+                        .update({
+                            "status": "failed",
+                            "last_error": "Ignorado: Aluno já respondeu no primeiro contato."
+                        })
+                        .eq("id", msg_id),
+                        label="marcar mensagem como pulada/failed por resposta anterior",
+                    )
+                total_failed += 1
+                continue
 
         if not wa_jid:
             print(f"{Colors.RED}[FALHA]{Colors.RESET} Aluno {student_name} - Sem contato/wa_jid cadastrado")
@@ -257,14 +313,25 @@ async def run_orchestrator(campaign_id: str | None, dry_run: bool = False) -> No
             continue
 
         unique_key = f"{msg['student_id']}|{msg['guardian_id']}"
-        template_id, text_body = catalog.build_message(
-            parent_name=meta.get("guardian_name", "Responsavel"),
-            student_name=student_name,
-            class_name=meta.get("turma", ""),
-            absence_days=meta.get("data_falta", ""),
-            campaign_id=campaign_id,
-            unique_key=unique_key,
-        )
+        if isinstance(catalog, FollowupMessageCatalog):
+            template_id, text_body = catalog.build_message(
+                parent_name=meta.get("guardian_name", "Responsavel"),
+                student_name=student_name,
+                class_name=meta.get("turma", ""),
+                absence_days=meta.get("data_falta", ""),
+                campaign_id=campaign_id,
+                unique_key=unique_key,
+                campaign_name=campaign_name,
+            )
+        else:
+            template_id, text_body = catalog.build_message(
+                parent_name=meta.get("guardian_name", "Responsavel"),
+                student_name=student_name,
+                class_name=meta.get("turma", ""),
+                absence_days=meta.get("data_falta", ""),
+                campaign_id=campaign_id,
+                unique_key=unique_key,
+            )
         protocol = _short_protocol(tracking_ref)
         final_text = (
             f"{text_body}\n\n"

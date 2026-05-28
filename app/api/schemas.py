@@ -52,6 +52,10 @@ class InboundReplyRequest(BaseModel):
     )
     ai_confidence: float | None = Field(None, ge=0.0, le=1.0)
     identity_confidence: str | None = Field(None, description="Confiança da identidade (HIGH, MEDIUM, LOW, UNRESOLVED)")
+    needs_review: bool | None = Field(None, description="Flag sinalizando necessidade de revisão humana")
+    handoff_reason: str | None = Field(None, description="Motivo do desvio para humano")
+    detected_intent: str | None = Field(None, description="Intenção detectada pela IA")
+    risk_level: str | None = Field(None, description="Nível de risco detectado (LOW, MEDIUM, HIGH)")
 
     # Opcional
     school_id: str | None = Field(None, description="UUID da escola (usa DEFAULT_SCHOOL_ID se omitido)")
@@ -109,3 +113,24 @@ class ConsolidatedCampaignReport(BaseModel):
     insights: list[str]
     class_analysis: dict[str, Any]
     priority_cases: list[dict[str, Any]]
+
+
+class AIInteractionRequest(BaseModel):
+    """Payload enviado pelo n8n para logar métricas e textos de processamento de IA."""
+    response_id: str | None = Field(None, description="UUID da resposta correlacionada")
+    student_id: str | None = Field(None, description="UUID do aluno")
+    prompt_version: str = Field(..., description="Versão do prompt utilizado")
+    model: str = Field(..., description="Modelo da LLM, ex: gpt-4o-mini")
+    input_text: str = Field(..., description="Texto ou prompt de entrada")
+    output_text: str = Field(..., description="Resposta gerada pela IA")
+    classified_reason: str | None = Field(None, description="Classificação final obtida")
+    risk_level: str | None = Field(None, description="Nível de risco extraído (LOW, MEDIUM, HIGH)")
+    tokens_input: int | None = Field(None, description="Quantidade de tokens de entrada")
+    tokens_output: int | None = Field(None, description="Quantidade de tokens de saída")
+    cost: float | None = Field(None, description="Custo estimado em USD da chamada")
+
+
+class AIInteractionResponse(BaseModel):
+    ok: bool = True
+    interaction_id: str
+
