@@ -10,6 +10,7 @@ import os
 import sys
 import argparse
 import re
+from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -20,6 +21,50 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 from dotenv import load_dotenv
 load_dotenv()
 from supabase import create_client, ClientOptions
+
+# ──────────────────────────────────────────────────────────────────────────────
+# MONKEY-PATCH: Retentativas globais para qualquer consulta Supabase/Postgrest
+# ──────────────────────────────────────────────────────────────────────────────
+try:
+    from postgrest._sync.request_builder import SyncQueryRequestBuilder
+    
+    _original_postgrest_execute = SyncQueryRequestBuilder.execute
+    
+    def _robust_postgrest_execute(self, *args, **kwargs):
+        import time
+        last_error = None
+        for attempt in range(1, 4):
+            try:
+                return _original_postgrest_execute(self, *args, **kwargs)
+            except Exception as exc:
+                last_error = exc
+                err_str = str(exc).lower()
+                exc_class = exc.__class__.__name__
+                
+                is_network_err = (
+                    "connect" in err_str or 
+                    "timeout" in err_str or 
+                    "getaddrinfo" in err_str or 
+                    "connection" in err_str or
+                    "http" in exc_class.lower() or
+                    "timeout" in exc_class.lower() or
+                    "error" in exc_class.lower()
+                )
+                if "apierror" in exc_class.lower() or "postgrest" in exc.__class__.__module__:
+                    is_network_err = False
+                    
+                if not is_network_err:
+                    raise exc
+                    
+                if attempt >= 3:
+                    break
+                time.sleep(2 ** attempt)
+        raise last_error
+
+    SyncQueryRequestBuilder.execute = _robust_postgrest_execute
+except Exception:
+    pass
+# ──────────────────────────────────────────────────────────────────────────────
 
 # ──────────────────────────────────────────────────────────────────────────────
 CONFIDENCE_ORDER = {"HIGH": 0, "MEDIUM": 1, "LOW": 2, "UNRESOLVED": 3}
@@ -43,7 +88,8 @@ def slugify(text: str) -> str:
 def make_client():
     url = os.environ["SUPABASE_URL"]
     key = os.environ["SUPABASE_KEY"]
-    return create_client(url, key, options=ClientOptions(schema="busca_ativa_v2"))
+    from supabase.lib.client_options import SyncClientOptions
+    return create_client(url, key, options=SyncClientOptions(schema="busca_ativa_v2", postgrest_client_timeout=30.0))
 
 
 def _parse_campaign_ids(campaign_id: str | list) -> list[str]:
@@ -157,100 +203,240 @@ def normalize_jid(jid: str) -> str:
 # ──────────────────────────────────────────────────────────────────────────────
 
 def build_report(client, campaign_id: str) -> str:
-    campaign_ids = _parse_campaign_ids(campaign_id)
-    campaign = fetch_campaign(client, campaign_id)
-    school_id = campaign["school_id"]
+    # First fetch the single campaign to get school_id
+    temp_campaign_ids = _parse_campaign_ids(campaign_id)
+    temp_campaign = fetch_campaign(client, temp_campaign_ids[0])
+    school_id = temp_campaign["school_id"]
+
+    # Resolve campaign group (RF-01)
+    from app.application.analytics.campaign_analytics import resolve_campaign_group
+    campaign_ids, c_rows = resolve_campaign_group(client, school_id, campaign_id)
+
+    # Use c_rows to build the campaign name and date
+    campaign = c_rows[0] if c_rows else temp_campaign
     absence_days = campaign.get("absence_days", "")
     if len(campaign_ids) > 1:
-        camp_name = f"{campaign.get('name', campaign_ids[0][:8])} + Follow-up"
+        camp_name = " + ".join(c.get("name", "") for c in c_rows if c.get("name")) or f"{campaign.get('name', campaign_ids[0][:8])} + Follow-up"
     else:
         camp_name = campaign.get("name", campaign_ids[0][:8])
 
     # Parse campaign date
     created = campaign.get("created_at", "")
-    camp_date = created[:10] if created else "????-??-??"
-    next_date = ""
     try:
-        d = datetime.fromisoformat(created.replace("Z", "+00:00"))
-        from datetime import timedelta
-        next_d = d + timedelta(days=1)
-        next_date = next_d.strftime("%Y-%m-%d")
+        campaign_date = datetime.fromisoformat(created.replace("Z", "+00:00")).date()
     except Exception:
-        pass
+        try:
+            campaign_date = datetime.strptime(absence_days.split(",")[0].strip(), "%d/%m/%Y").date()
+        except Exception:
+            campaign_date = datetime.now().date()
+            
+    camp_date = campaign_date.isoformat()
 
-    messages = fetch_messages(client, campaign_id)
+    # 1. Pegar Mapa de Identidade (LIDs)
+    identity_map = {}
+    id_rows = client.table("phone_identity_map").select("wa_jid, lid_jid").execute().data or []
+    for row in id_rows:
+        identity_map[row["lid_jid"]] = row["wa_jid"]
+
+    # 2. Pegar todas as mensagens
+    all_msgs = client.table("messages").select("*, students(*), guardians(*)").in_("campaign_id", campaign_ids).execute().data or []
+
+    # 3. Pegar todas as respostas da campanha + respostas do mesmo dia
+    campaign_date_iso = campaign_date.isoformat()
+    or_filters = [f"campaign_id.in.({','.join(campaign_ids)})", f"received_at.gte.{campaign_date_iso}T00:00:00+00:00"]
+    all_resps_raw = client.table("responses").select("*").or_(",".join(or_filters)).execute().data or []
     
-    # Deduplicate outbound messages by student_id to ensure unique students
-    unique_messages = {}
-    for m in messages:
-        sid = m.get("student_id")
-        if not sid:
+    all_resps = []
+    for r in all_resps_raw:
+        if r.get("campaign_id") in campaign_ids:
+            all_resps.append(r)
             continue
-        if sid not in unique_messages:
-            unique_messages[sid] = m
-        else:
-            # Prefer successful sent statuses over failed
-            curr_status = unique_messages[sid].get("status")
-            new_status = m.get("status")
-            if curr_status == "failed" and new_status != "failed":
-                unique_messages[sid] = m
-            elif curr_status != "failed" and new_status == "failed":
+        rx_at_str = r.get("received_at")
+        if rx_at_str:
+            try:
+                rx_date = datetime.fromisoformat(rx_at_str.replace("Z", "+00:00")).date()
+                if rx_date == campaign_date:
+                    all_resps.append(r)
+            except Exception:
                 pass
-            else:
-                curr_sent = unique_messages[sid].get("sent_at") or ""
-                new_sent = m.get("sent_at") or ""
-                if new_sent > curr_sent:
-                    unique_messages[sid] = m
-    messages = list(unique_messages.values())
 
-    responses = fetch_responses(client, campaign_id)
+    # Pegar push_name de cada sender_jid
+    sessions = {}
+    senders = {r.get("sender_jid") for r in all_resps if r.get("sender_jid")}
+    if senders:
+        s_rows = client.table("conversation_sessions").select("sender_jid, push_name").eq("school_id", school_id).in_("sender_jid", list(senders)).execute().data or []
+        for s in s_rows:
+            sessions[s["sender_jid"]] = s.get("push_name") or ""
 
-    # Also fetch late replies (next day)
-    if next_date:
-        late = fetch_next_day_responses(client, school_id, campaign_id, next_date)
-        # Avoid duplicates
-        existing_ids = {r["id"] for r in responses}
-        for r in late:
-            if r["id"] not in existing_ids:
-                responses.append(r)
-
-    # Collect all IDs to bulk-fetch
-    all_student_ids = list({m["student_id"] for m in messages if m.get("student_id")} |
-                           {r["student_id"] for r in responses if r.get("student_id")})
-    all_guardian_ids = list({m["guardian_id"] for m in messages if m.get("guardian_id")} |
-                            {r["guardian_id"] for r in responses if r.get("guardian_id")})
+    # Bulk-fetch students/guardians maps
+    all_student_ids = list({m.get("student_id") for m in all_msgs if m.get("student_id")} |
+                           {r.get("student_id") for r in all_resps if r.get("student_id")})
+    all_guardian_ids = list({m.get("guardian_id") for m in all_msgs if m.get("guardian_id")} |
+                            {r.get("guardian_id") for r in all_resps if r.get("guardian_id")})
 
     students_map = fetch_students(client, all_student_ids)
     guardians_map = fetch_guardians(client, all_guardian_ids)
-    phone_id_map = fetch_phone_identity_map(client, school_id)
 
-    # Group responses by student_id (best) or by sender_jid (fallback)
-    # Key = student_id if known, else sender_jid
-    resp_by_student: dict[str, list] = {}
-    for resp in responses:
-        key = resp.get("student_id") or resp.get("sender_jid") or "unknown"
-        resp_by_student.setdefault(key, []).append(resp)
+    def get_student_key(student_id: str) -> str:
+        if not student_id:
+            return ""
+        std = students_map.get(student_id) or {}
+        ra = std.get("ra")
+        if ra and str(ra).strip():
+            return f"ra:{str(ra).strip()}"
+        return f"id:{student_id}"
 
-    # For messages without a response linked, attempt to link via phone_identity_map
-    # by wa_jid -> guardian -> student
-    guardian_to_student: dict[str, str] = {}
-    for msg in messages:
-        g = msg.get("guardian_id")
-        s = msg.get("student_id")
-        if g and s:
-            guardian_to_student[g] = s
+    # Agrupar mensagens por aluno único (mesmo com falhas)
+    student_puzzle = defaultdict(lambda: {"outbounds": [], "inbounds": [], "student": {}, "guardian": {}})
+    student_id_to_key = {}
+    for m in all_msgs:
+        sid = m.get("student_id")
+        if not sid:
+            continue
+        skey = get_student_key(sid)
+        student_id_to_key[sid] = skey
+        
+        student_puzzle[skey]["outbounds"].append(m)
+        if not student_puzzle[skey]["student"]:
+            student_puzzle[skey]["student"] = students_map.get(sid) or m.get("students") or {}
+        if not student_puzzle[skey]["guardian"]:
+            student_puzzle[skey]["guardian"] = guardians_map.get(m.get("guardian_id")) or m.get("guardians") or {}
 
-    # Enrich unresolved responses with phone_identity_map
-    for resp in responses:
-        if not resp.get("student_id") and resp.get("sender_jid"):
-            g_id = phone_id_map.get(resp["sender_jid"])
-            if g_id:
-                s_id = guardian_to_student.get(g_id)
-                if s_id:
-                    resp["_inferred_student_id"] = s_id
-                    resp["_inferred_guardian_id"] = g_id
+    # Import helpers from consolidate_campaign_report
+    from scripts.consolidate_campaign_report import analyze_inbound, extract_protocol, suggest_student, clean_text
 
-    # ── Build per-student blocks ──────────────────────────────────────────────
+    # Distribuir respostas por aluno único
+    by_sender = defaultdict(list)
+    for r in all_resps:
+        if r.get("sender_jid"):
+            by_sender[r["sender_jid"]].append(r)
+
+    sent_msgs = [m for m in all_msgs if m.get("status") in ["sent", "delivered", "read", "replied"]]
+    mapped_response_ids = set()
+
+    for sender, resps in by_sender.items():
+        target_skey = None
+        
+        for r in resps:
+            sid = r.get("student_id")
+            if sid:
+                target_skey = student_id_to_key.get(sid) or get_student_key(sid)
+                break
+                
+        if not target_skey:
+            for r in resps:
+                proto = extract_protocol(r.get("body") or "")
+                if proto:
+                    for m in sent_msgs:
+                        if proto in (m.get("body_preview") or ""):
+                            sid = m.get("student_id")
+                            if sid:
+                                target_skey = student_id_to_key.get(sid) or get_student_key(sid)
+                                break
+                    if target_skey:
+                        break
+                        
+        if not target_skey:
+            resolved_sender = identity_map.get(sender, sender)
+            for skey, data in student_puzzle.items():
+                phone = data["guardian"].get("phone_e164") or ""
+                if phone and phone in resolved_sender:
+                    target_skey = skey
+                    break
+                if data["outbounds"] and any(m.get("wa_jid") == resolved_sender for m in data["outbounds"]):
+                    target_skey = skey
+                    break
+                    
+        if not target_skey:
+            push_name = sessions.get(sender, "")
+            combined_text = " | ".join(clean_text(r.get("body")) for r in resps)
+            suggestion_text = f"{push_name} | {combined_text}"
+            suggested_name, score, note = suggest_student(sent_msgs, suggestion_text)
+            if suggested_name:
+                for m in sent_msgs:
+                    if m.get("students", {}).get("name") == suggested_name:
+                        sid = m.get("student_id")
+                        if sid:
+                            target_skey = student_id_to_key.get(sid) or get_student_key(sid)
+                            break
+                        
+        if target_skey and target_skey in student_puzzle:
+            existing_ids = {x.get("id") for x in student_puzzle[target_skey]["inbounds"] if x.get("id")}
+            for r in resps:
+                if r.get("id") not in existing_ids:
+                    student_puzzle[target_skey]["inbounds"].append(r)
+                mapped_response_ids.add(r.get("id"))
+        else:
+            for r in resps:
+                if r.get("id"):
+                    mapped_response_ids.add(r.get("id"))
+
+    # Track which targeted students responded
+    responded_student_keys = set()
+    for skey, data in student_puzzle.items():
+        has_success = any(m.get("status") in ["sent", "delivered", "read", "replied"] for m in data["outbounds"])
+        if not has_success:
+            continue
+        if len(data["inbounds"]) > 0:
+            responded_student_keys.add(skey)
+
+    # Summary stats
+    total = len(student_puzzle)
+    sent = sum(1 for skey, data in student_puzzle.items() if any(m.get("status") in ["sent", "delivered", "read", "replied"] for m in data["outbounds"]))
+    failed = sum(1 for skey, data in student_puzzle.items() if not any(m.get("status") in ["sent", "delivered", "read", "replied"] for m in data["outbounds"]) and any(m.get("status") == "failed" for m in data["outbounds"]))
+    with_resp = len(responded_student_keys)
+
+    high_conf = sum(1 for r in all_resps if r.get("identity_confidence") == "HIGH")
+    unresolved = sum(1 for r in all_resps if r.get("identity_confidence") == "UNRESOLVED")
+
+    # ── Group responses by sender for display ──────────────────────────────────
+    grouped_resp: dict[str, dict] = {}
+    
+    for skey, data in student_puzzle.items():
+        if skey not in responded_student_keys:
+            continue
+        for r in data["inbounds"]:
+            jid = r.get("sender_jid") or "unknown"
+            if jid not in grouped_resp:
+                grouped_resp[jid] = {
+                    "jid": jid,
+                    "student_id": data["student"].get("id"),
+                    "guardian_id": data["guardian"].get("id"),
+                    "confidence": r.get("identity_confidence", "UNRESOLVED"),
+                    "texts": [],
+                    "received_at": r.get("received_at")
+                }
+            
+            current_conf = r.get("identity_confidence", "UNRESOLVED")
+            if CONFIDENCE_ORDER.get(current_conf, 9) < CONFIDENCE_ORDER.get(grouped_resp[jid]["confidence"], 9):
+                grouped_resp[jid]["confidence"] = current_conf
+            
+            txt = safe_str(r.get("body") or r.get("reason") or "").strip()
+            if txt and txt not in grouped_resp[jid]["texts"]:
+                grouped_resp[jid]["texts"].append(txt)
+
+    unmapped_resps = [r for r in all_resps if r.get("id") not in mapped_response_ids]
+    for r in unmapped_resps:
+        jid = r.get("sender_jid") or "unknown"
+        if jid not in grouped_resp:
+            grouped_resp[jid] = {
+                "jid": jid,
+                "student_id": r.get("student_id"),
+                "guardian_id": r.get("guardian_id"),
+                "confidence": r.get("identity_confidence", "UNRESOLVED"),
+                "texts": [],
+                "received_at": r.get("received_at")
+            }
+        
+        current_conf = r.get("identity_confidence", "UNRESOLVED")
+        if CONFIDENCE_ORDER.get(current_conf, 9) < CONFIDENCE_ORDER.get(grouped_resp[jid]["confidence"], 9):
+            grouped_resp[jid]["confidence"] = current_conf
+        
+        txt = safe_str(r.get("body") or r.get("reason") or "").strip()
+        if txt and txt not in grouped_resp[jid]["texts"]:
+            grouped_resp[jid]["texts"].append(txt)
+
+    # ── Build output lines ────────────────────────────────────────────────────
     lines = []
     lines.append(f"# Relatório Operacional — {camp_name}")
     lines.append(f"**Data da campanha:** {camp_date}  ")
@@ -258,14 +444,6 @@ def build_report(client, campaign_id: str) -> str:
     lines.append(f"**ID da campanha:** `{', '.join(campaign_ids)}`  ")
     lines.append(f"**Gerado em:** {datetime.now().strftime('%d/%m/%Y %H:%M')}  ")
     lines.append("")
-
-    # Summary stats
-    total = len(messages)
-    sent = sum(1 for m in messages if m.get("status") in ("sent", "delivered", "read"))
-    failed = sum(1 for m in messages if m.get("status") == "failed")
-    with_resp = len({r.get("student_id") or r.get("sender_jid") for r in responses})
-    high_conf = sum(1 for r in responses if r.get("identity_confidence") == "HIGH")
-    unresolved = sum(1 for r in responses if r.get("identity_confidence") == "UNRESOLVED")
 
     lines.append("## Resumo")
     lines.append("")
@@ -284,38 +462,6 @@ def build_report(client, campaign_id: str) -> str:
     lines.append("## Justificativas Recebidas")
     lines.append("")
 
-    responded_student_ids = set()
-
-    # Group responses by sender for the report display
-    grouped_resp: dict[str, dict] = {}
-    for resp in responses:
-        jid = resp.get("sender_jid", "unknown")
-        if jid not in grouped_resp:
-            sid = resp.get("student_id") or resp.get("_inferred_student_id")
-            gid = resp.get("guardian_id") or resp.get("_inferred_guardian_id")
-            grouped_resp[jid] = {
-                "jid": jid,
-                "student_id": sid,
-                "guardian_id": gid,
-                "confidence": resp.get("identity_confidence", "UNRESOLVED"),
-                "texts": [],
-                "received_at": resp.get("received_at")
-            }
-        
-        # Update confidence to the highest one found for this sender
-        current_conf = resp.get("identity_confidence", "UNRESOLVED")
-        if CONFIDENCE_ORDER.get(current_conf, 9) < CONFIDENCE_ORDER.get(grouped_resp[jid]["confidence"], 9):
-            grouped_resp[jid]["confidence"] = current_conf
-            # Also update IDs if they were missing
-            if not grouped_resp[jid]["student_id"]:
-                grouped_resp[jid]["student_id"] = resp.get("student_id") or resp.get("_inferred_student_id")
-            if not grouped_resp[jid]["guardian_id"]:
-                grouped_resp[jid]["guardian_id"] = resp.get("guardian_id") or resp.get("_inferred_guardian_id")
-
-        txt = safe_str(resp.get("body") or resp.get("reason") or "").strip()
-        if txt:
-            grouped_resp[jid]["texts"].append(txt)
-
     for jid, data in sorted(grouped_resp.items(), key=lambda x: CONFIDENCE_ORDER.get(x[1]["confidence"], 9)):
         sid = data["student_id"]
         gid = data["guardian_id"]
@@ -330,9 +476,6 @@ def build_report(client, campaign_id: str) -> str:
         student_class = safe_str(student.get("class_name") or "")
         student_ra = safe_str(student.get("ra") or "")
         guardian_name = safe_str(guardian.get("name") or "Responsável não identificado")
-
-        if sid:
-            responded_student_ids.add(sid)
 
         conf_emoji = {"HIGH": "🟢", "MEDIUM": "🟡", "LOW": "🟠", "UNRESOLVED": "🔴"}.get(conf, "❓")
 
@@ -356,15 +499,27 @@ def build_report(client, campaign_id: str) -> str:
     lines.append("|---|---|---|---|")
 
     no_reply_count = 0
-    for msg in sorted(messages, key=lambda m: safe_str(students_map.get(m.get("student_id", ""), {}).get("class_name", ""))):
-        sid = msg.get("student_id")
-        if sid and sid in responded_student_ids:
+    sorted_no_reply_students = []
+    for skey, data in student_puzzle.items():
+        if skey in responded_student_keys:
             continue
-        student = students_map.get(sid, {}) if sid else {}
-        sname = safe_str(student.get("name") or sid or "?")
-        sclass = safe_str(student.get("class_name") or "")
-        sra = safe_str(student.get("ra") or "")
-        status = safe_str(msg.get("status") or "?")
+        std = data["student"]
+        sname = safe_str(std.get("name") or "?")
+        sorted_no_reply_students.append((sname, skey, data))
+
+    sorted_no_reply_students.sort(key=lambda x: x[0])
+
+    for sname, skey, data in sorted_no_reply_students:
+        std = data["student"]
+        sclass = safe_str(std.get("class_name") or "")
+        sra = safe_str(std.get("ra") or "")
+        
+        success_msgs = [m for m in data["outbounds"] if m.get("status") in ["sent", "delivered", "read", "replied"]]
+        if success_msgs:
+            status = success_msgs[-1].get("status")
+        else:
+            status = data["outbounds"][0].get("status") if data["outbounds"] else "failed"
+            
         lines.append(f"| {sra} | {sname} | {sclass} | {status} |")
         no_reply_count += 1
 

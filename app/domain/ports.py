@@ -104,3 +104,6 @@ class OutboundRepository(Protocol):
 
 class WhatsAppGateway(Protocol):
     def send_text(self, *, to_jid: str, text: str, dry_run: bool = False) -> SendResult: ...
+    def send_presence(
+        self, *, to_jid: str, presence: str = "composing", delay: int = 2000, dry_run: bool = False
+    ) -> SendResult: ...

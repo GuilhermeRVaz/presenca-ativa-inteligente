@@ -13,10 +13,16 @@ import asyncio
 import hashlib
 import random
 import sys
+import io
 import time
 import requests
 from datetime import datetime, timezone
 from pathlib import Path
+
+# Force UTF-8 stdout/stderr for Windows console
+if sys.platform.startswith("win"):
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace", line_buffering=True)
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace", line_buffering=True)
 from typing import Any, Callable
 
 
@@ -177,7 +183,12 @@ def _message_status_counts(client, campaign_id: str) -> dict[str, int]:
     return counts
 
 
-async def run_orchestrator(campaign_id: str | None, dry_run: bool = False) -> None:
+async def run_orchestrator(
+    campaign_id: str | None,
+    dry_run: bool = False,
+    min_delay: int = 45,
+    max_delay: int = 120,
+) -> None:
     client = _build_supabase_client()
     gateway = EvolutionGateway()
 
@@ -246,23 +257,23 @@ async def run_orchestrator(campaign_id: str | None, dry_run: bool = False) -> No
     total_sent = 0
     total_failed = 0
 
-    while True:
-        res = _execute_with_retry(
-            lambda: client.schema("busca_ativa_v2")
-            .table("messages")
-            .select("id, wa_jid, tracking_ref, metadata, student_id, guardian_id, origin_message_id")
-            .eq("campaign_id", campaign_id)
-            .eq("status", "pending")
-            .order("created_at", desc=False)
-            .limit(1),
-            label="buscar proxima mensagem pending",
-        )
+    res = _execute_with_retry(
+        lambda: client.schema("busca_ativa_v2")
+        .table("messages")
+        .select("id, wa_jid, tracking_ref, metadata, student_id, guardian_id, origin_message_id")
+        .eq("campaign_id", campaign_id)
+        .eq("status", "pending")
+        .order("created_at", desc=False),
+        label="buscar mensagens pending",
+    )
 
-        if not res.data:
-            print(f"\n{Colors.GREEN}Fila zerada! Nenhuma mensagem pending encontrada.{Colors.RESET}")
-            break
+    if not res.data:
+        print(f"\n{Colors.GREEN}Fila zerada! Nenhuma mensagem pending encontrada.{Colors.RESET}")
+        return
 
-        msg = res.data[0]
+    print(f"Encontradas {len(res.data)} mensagens pendentes para processar.")
+
+    for msg in res.data:
         msg_id = msg["id"]
         wa_jid = msg.get("wa_jid")
         tracking_ref = msg["tracking_ref"]
@@ -313,7 +324,10 @@ async def run_orchestrator(campaign_id: str | None, dry_run: bool = False) -> No
             continue
 
         unique_key = f"{msg['student_id']}|{msg['guardian_id']}"
-        if isinstance(catalog, FollowupMessageCatalog):
+        if meta.get("custom_message"):
+            template_id = "bolsa_familia_custom"
+            text_body = meta["custom_message"]
+        elif isinstance(catalog, FollowupMessageCatalog):
             template_id, text_body = catalog.build_message(
                 parent_name=meta.get("guardian_name", "Responsavel"),
                 student_name=student_name,
@@ -332,15 +346,31 @@ async def run_orchestrator(campaign_id: str | None, dry_run: bool = False) -> No
                 campaign_id=campaign_id,
                 unique_key=unique_key,
             )
-        protocol = _short_protocol(tracking_ref)
-        final_text = (
-            f"{text_body}\n\n"
-            f"Codigo do aluno: P-{protocol}\n"
-            f"Para justificar, responda copiando o codigo acima ou escreva o nome completo do aluno junto com o motivo da falta.\n"
-            f"Exemplo: P-{protocol} estava com febre."
-        )
+        if campaign_type == "obmep" or meta.get("skip_justification_suffix"):
+            final_text = text_body
+        else:
+            protocol = _short_protocol(tracking_ref)
+            final_text = (
+                f"{text_body}\n\n"
+                f"Codigo do aluno: P-{protocol}\n"
+                f"Para justificar, responda copiando o codigo acima ou escreva o nome completo do aluno junto com o motivo da falta.\n"
+                f"Exemplo: P-{protocol} estava com febre."
+            )
 
         try:
+            # Pacing Anti-Ban: Simula digitando por um tempo aleatorio entre 1.5 e 3.0 segundos
+            typing_delay_ms = random.randint(1500, 3000)
+            await asyncio.to_thread(
+                gateway.send_presence,
+                to_jid=wa_jid,
+                presence="composing",
+                delay=typing_delay_ms,
+                dry_run=dry_run,
+            )
+            if not dry_run:
+                # Espera fisicamente o delay de digitação para a Meta ver o intervalo entre o status e a mensagem
+                await asyncio.sleep(typing_delay_ms / 1000.0)
+
             send_result = await asyncio.to_thread(
                 gateway.send_text,
                 to_jid=wa_jid,
@@ -409,9 +439,12 @@ async def run_orchestrator(campaign_id: str | None, dry_run: bool = False) -> No
                 )
             total_failed += 1
 
-        delay = random.randint(MIN_DELAY, MAX_DELAY)
-        print(f"{Colors.YELLOW}[AGUARDANDO {delay}s...]{Colors.RESET} Pacing Anti-Ban ativo.")
-        await asyncio.sleep(delay)
+        if not dry_run:
+            delay = random.randint(min_delay, max_delay)
+            print(f"{Colors.YELLOW}[AGUARDANDO {delay}s...]{Colors.RESET} Pacing Anti-Ban ativo.")
+            await asyncio.sleep(delay)
+        else:
+            print(f"{Colors.YELLOW}[DRY RUN]{Colors.RESET} Paging delay skipped.")
 
     if not dry_run:
         status_counts = _message_status_counts(client, campaign_id)
@@ -442,9 +475,16 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Fase 2: orquestrador de disparo anti-ban")
     parser.add_argument("--campaign-id", type=str, default=None, help="ID da campanha. Se vazio, pega a mais recente.")
     parser.add_argument("--dry-run", action="store_true", help="Simula envio sem disparar na Evolution API.")
+    parser.add_argument("--min-delay", type=int, default=45, help="Tempo minimo de espera entre mensagens em segundos.")
+    parser.add_argument("--max-delay", type=int, default=120, help="Tempo maximo de espera entre mensagens em segundos.")
     args = parser.parse_args()
 
     try:
-        asyncio.run(run_orchestrator(campaign_id=args.campaign_id, dry_run=args.dry_run))
+        asyncio.run(run_orchestrator(
+            campaign_id=args.campaign_id,
+            dry_run=args.dry_run,
+            min_delay=args.min_delay,
+            max_delay=args.max_delay,
+        ))
     except KeyboardInterrupt:
         print(f"\n{Colors.YELLOW}Orquestrador interrompido. A fila esta salva e pode ser retomada.{Colors.RESET}")

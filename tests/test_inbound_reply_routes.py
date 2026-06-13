@@ -12,6 +12,7 @@ class FakeReplyRepository:
         self.active_campaign_id = "campaign-1"
         self.upserts: list[dict] = []
         self.saved: list[dict] = []
+        self.session_upserts: list[dict] = []
         guardian = GuardianRecord(
             id="guardian-1",
             name="Maria",
@@ -44,6 +45,11 @@ class FakeReplyRepository:
         self.saved.append(kwargs)
         return "response-1", True
 
+    def upsert_session(self, **kwargs):
+        self.session_upserts.append(kwargs)
+        # Return a dummy record or mock response
+        return None
+
 
 class InboundReplyRouteTests(unittest.TestCase):
     def test_inbound_reply_learns_lid_identity_from_n8n_guardian(self):
@@ -56,9 +62,10 @@ class InboundReplyRouteTests(unittest.TestCase):
             guardian_id="guardian-1",
             reason="ILLNESS",
             ai_confidence=0.9,
+            student_id="student-1",
         )
 
-        with patch("app.api.routes.build_repository", return_value=repo):
+        with patch("app.api.routes.build_repository_internal", return_value=repo):
             response = inbound_reply(payload)
 
         self.assertTrue(response.ok)
@@ -71,6 +78,9 @@ class InboundReplyRouteTests(unittest.TestCase):
         self.assertEqual(repo.saved[0]["identity_confidence"], "HIGH")
         self.assertEqual(repo.saved[0]["message_id"], "message-1")
         self.assertEqual(repo.saved[0]["student_id"], "student-1")
+        self.assertEqual(len(repo.session_upserts), 1)
+        self.assertEqual(repo.session_upserts[0]["student_id"], "student-1")
+        self.assertEqual(repo.session_upserts[0]["resolved"], True)
 
 
 if __name__ == "__main__":

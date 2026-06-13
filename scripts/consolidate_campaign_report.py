@@ -15,6 +15,15 @@ from pathlib import Path
 from typing import Any
 
 from dotenv import load_dotenv
+import io
+
+# Force UTF-8 stdout/stderr for Windows console
+if sys.platform.startswith("win") and "pytest" not in sys.modules:
+    try:
+        sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace", line_buffering=True)
+        sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace", line_buffering=True)
+    except (AttributeError, io.UnsupportedOperation):
+        pass
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
 if str(ROOT_DIR) not in sys.path:
@@ -160,7 +169,7 @@ def _evo_scan_jid(jid: str, target_date: date) -> tuple[list[dict], list[dict]]:
             pai.append(entry)
     return escola, pai
 
-def _evo_find_missing_responses(student_puzzle: dict, identity_map: dict, campaign_date: date) -> dict:
+def _evo_find_missing_responses(client, school_id: str, campaign_ids: list[str], student_puzzle: dict, identity_map: dict, campaign_date: date) -> dict:
     """Varre Evolution API para alunos sem inbound response na tabela responses.
     Retorna {student_id: list[ChatEvent]} com eventos inbound detectados via Evolution."""
     found = {}
@@ -259,6 +268,55 @@ def _evo_find_missing_responses(student_puzzle: dict, identity_map: dict, campai
             student_puzzle[sid]["inbounds_evo"] = events
             found[sid] = events
             found_count += 1
+            
+            # Persistir respostas encontradas no banco de dados para sincronia perfeita (RF-04)
+            outbound = data["outbounds"][0] if data["outbounds"] else {}
+            guardian_id = data["guardian"].get("id") or outbound.get("guardian_id")
+            campaign_id = outbound.get("campaign_id") or campaign_ids[0]
+            message_id = outbound.get("id")
+            
+            for ev in events:
+                if ev.type != "INBOUND":
+                    continue
+                
+                reason = "OTHER"
+                body_lower = ev.body.lower()
+                if any(k in body_lower for k in ["febre", "gripe", "garganta", "dor", "estomago", "vomito", "vomitando", "diarreia", "doente", "medico", "medica", "atestado", "consulta", "hospital", "upa", "saude", " influenza"]):
+                    reason = "ILLNESS"
+                elif any(k in body_lower for k in ["trabalho", "servico", "serviço", "emprego"]):
+                    reason = "WORK"
+                elif any(k in body_lower for k in ["viagem", "viajou", "viajar", "viajando"]):
+                    reason = "TRAVEL"
+                elif any(k in body_lower for k in ["familia", "família", "mãe", "pai", "avo", "vó", "falecimento", "obito", "óbito", "funeral", "luto"]):
+                    reason = "FAMILY"
+                elif any(k in body_lower for k in ["chuva", "choveu", "chovendo", "transporte", "onibus", "ônibus"]):
+                    reason = "SCHOOL_ISSUE"
+
+                raw_msg_id = f"evolution-{ev.sender}-{ev.timestamp.isoformat()}"
+                row = {
+                    "school_id": school_id,
+                    "raw_message_id": raw_msg_id,
+                    "sender_jid": outbound_jid,
+                    "body": ev.body,
+                    "identity_confidence": "HIGH",
+                    "message_id": message_id,
+                    "guardian_id": guardian_id,
+                    "campaign_id": campaign_id,
+                    "student_id": student_id,
+                    "classified": True,
+                    "reason": reason,
+                    "ai_confidence": 1.0,
+                    "received_at": ev.timestamp.isoformat(),
+                    "handoff_reason": "evolution_scan",
+                    "detected_intent": "JUSTIFICATIVA_FALTA",
+                    "risk_level": "LOW",
+                    "needs_review": False
+                }
+                
+                try:
+                    client.table("responses").upsert(row, on_conflict="raw_message_id").execute()
+                except Exception as e:
+                    print(f"    [DB SAVE ERR] Falha ao salvar resposta Evolution: {e}")
 
         scanned += 1
         if scanned % 5 == 0:
@@ -314,10 +372,12 @@ def run_consolidate(campaign_id: str, school_id: str) -> dict:
     else:
         campaign_ids = [campaign_id]
 
-    c_rows = client.table("campaigns").select("id, name, absence_days").in_("id", campaign_ids).execute().data or []
-    campaign_name = " + ".join(c["name"] for c in c_rows if c.get("name")) or "Campanha Desconhecida"
-    absence_days_str = c_rows[0]["absence_days"] if c_rows else date.today().strftime("%d/%m/%Y")
+    # Resolução do Grupo de Campanhas (RF-01)
+    from app.application.analytics.campaign_analytics import resolve_campaign_group
+    campaign_ids, c_rows = resolve_campaign_group(client, school_id, campaign_ids, repo._execute_with_retry)
+    absence_days_str = c_rows[0].get("absence_days") if c_rows else date.today().strftime("%d/%m/%Y")
 
+    campaign_name = " + ".join(c["name"] for c in c_rows if c.get("name")) or "Campanha Desconhecida"
     try:
         campaign_date = datetime.strptime(absence_days_str.split(",")[0].strip(), "%d/%m/%Y").date()
     except Exception:
@@ -332,13 +392,10 @@ def run_consolidate(campaign_id: str, school_id: str) -> dict:
     # 2. Pegar TODAS as mensagens e respostas da campanha + respostas órfãs de hoje
     all_msgs = client.table("messages").select("*, students(*), guardians(*)").in_("campaign_id", campaign_ids).execute().data or []
     
-    # Busca ampla de respostas: da campanha OU do dia da campanha (para pegar follow-ups manuais/outros)
     campaign_date_iso = campaign_date.isoformat()
-    
     or_filters = [f"campaign_id.in.({','.join(campaign_ids)})", f"received_at.gte.{campaign_date_iso}T00:00:00+00:00"]
     all_resps_raw = client.table("responses").select("*").or_(",".join(or_filters)).execute().data or []
     
-    # Filtrar respostas em memoria para garantir que sao da campanha ou da mesma data
     all_resps = []
     for r in all_resps_raw:
         if r.get("campaign_id") in campaign_ids:
@@ -353,13 +410,28 @@ def run_consolidate(campaign_id: str, school_id: str) -> dict:
     # 3. Organizar por Aluno
     sent_msgs = [m for m in all_msgs if m.get("status") in ["sent", "delivered", "read", "replied"]]
     
+    def get_student_key(student_id: str, student_ra: str | None) -> str:
+        if student_ra and str(student_ra).strip():
+            return f"ra:{str(student_ra).strip()}"
+        return f"id:{student_id}"
+
     student_puzzle = defaultdict(lambda: {"outbounds": [], "inbounds": [], "student": {}, "guardian": {}})
+    student_id_to_key = {}
     
     for m in sent_msgs:
         sid = m.get("student_id")
-        student_puzzle[sid]["outbounds"].append(m)
-        student_puzzle[sid]["student"] = m.get("students") or {}
-        student_puzzle[sid]["guardian"] = m.get("guardians") or {}
+        if not sid:
+            continue
+        std = m.get("students") or {}
+        ra = std.get("ra")
+        skey = get_student_key(sid, ra)
+        student_id_to_key[sid] = skey
+        
+        student_puzzle[skey]["outbounds"].append(m)
+        if not student_puzzle[skey]["student"]:
+            student_puzzle[skey]["student"] = std
+        if not student_puzzle[skey]["guardian"]:
+            student_puzzle[skey]["guardian"] = m.get("guardians") or {}
 
     # Pegar push_name de cada sender_jid
     sessions = {}
@@ -369,43 +441,46 @@ def run_consolidate(campaign_id: str, school_id: str) -> dict:
         for s in s_rows:
             sessions[s["sender_jid"]] = s.get("push_name") or ""
 
-    # Distribuir respostas de forma inteligente e agrupada por sender_jid
+    # Distribuir respostas por sender_jid
     by_sender = defaultdict(list)
     for r in all_resps:
         if r.get("sender_jid"):
             by_sender[r["sender_jid"]].append(r)
             
     for sender, resps in by_sender.items():
-        target_sid = None
+        target_skey = None
         
         for r in resps:
-            if r.get("student_id"):
-                target_sid = r["student_id"]
+            sid = r.get("student_id")
+            if sid:
+                target_skey = student_id_to_key.get(sid) or get_student_key(sid, None)
                 break
                 
-        if not target_sid:
+        if not target_skey:
             for r in resps:
                 proto = extract_protocol(r.get("body") or "")
                 if proto:
                     for m in sent_msgs:
                         if proto in (m.get("body_preview") or ""):
-                            target_sid = m.get("student_id")
-                            break
-                    if target_sid:
+                            sid = m.get("student_id")
+                            if sid:
+                                target_skey = student_id_to_key.get(sid) or get_student_key(sid, None)
+                                break
+                    if target_skey:
                         break
                         
-        if not target_sid:
+        if not target_skey:
             resolved_sender = identity_map.get(sender, sender)
-            for sid_key, data in student_puzzle.items():
+            for skey, data in student_puzzle.items():
                 phone = data["guardian"].get("phone_e164") or ""
                 if phone and phone in resolved_sender:
-                    target_sid = sid_key
+                    target_skey = skey
                     break
-                if data["outbounds"] and data["outbounds"][0].get("wa_jid") == resolved_sender:
-                    target_sid = sid_key
+                if data["outbounds"] and any(m.get("wa_jid") == resolved_sender for m in data["outbounds"]):
+                    target_skey = skey
                     break
                     
-        if not target_sid:
+        if not target_skey:
             push_name = sessions.get(sender, "")
             combined_text = " | ".join(clean_text(r.get("body")) for r in resps)
             suggestion_text = f"{push_name} | {combined_text}"
@@ -413,28 +488,30 @@ def run_consolidate(campaign_id: str, school_id: str) -> dict:
             if suggested_name:
                 for m in sent_msgs:
                     if m.get("students", {}).get("name") == suggested_name:
-                        target_sid = m.get("student_id")
-                        break
+                        sid = m.get("student_id")
+                        if sid:
+                            target_skey = student_id_to_key.get(sid) or get_student_key(sid, None)
+                            break
                         
-        if target_sid and target_sid in student_puzzle:
-            existing_ids = {x.get("id") for x in student_puzzle[target_sid]["inbounds"] if x.get("id")}
+        if target_skey and target_skey in student_puzzle:
+            existing_ids = {x.get("id") for x in student_puzzle[target_skey]["inbounds"] if x.get("id")}
             for r in resps:
                 if r.get("id") not in existing_ids:
-                    student_puzzle[target_sid]["inbounds"].append(r)
+                    student_puzzle[target_skey]["inbounds"].append(r)
 
     # 3.5 Evolution Fallback: varrer WhatsApp para alunos sem resposta no banco
     print(f"\n  [Evolution] Buscando respostas diretamente no WhatsApp para alunos sem retorno no banco...")
-    evo_found = _evo_find_missing_responses(student_puzzle, identity_map, campaign_date)
-    for sid, evo_events in evo_found.items():
-        student_puzzle[sid]["inbounds_evo"] = evo_events
+    evo_found = _evo_find_missing_responses(client, school_id, campaign_ids, student_puzzle, identity_map, campaign_date)
+    for skey, evo_events in evo_found.items():
+        student_puzzle[skey]["inbounds_evo"] = evo_events
     print()
 
     # 4. Construir Diário Auditado
     final_blocks = []
-    for sid, data in student_puzzle.items():
+    for skey, data in student_puzzle.items():
         events: list[ChatEvent] = []
         
-        sorted_out = sorted(data["outbounds"], key=lambda x: x.get("sent_at") or x.get("created_at"))
+        sorted_out = sorted(data["outbounds"], key=lambda x: x.get("sent_at") or x.get("created_at") or "")
         for i, m in enumerate(sorted_out):
             etype = "OUTBOUND_INITIAL" if i == 0 else "OUTBOUND_FOLLOWUP"
             ts_str = m.get("sent_at") or m.get("created_at")
@@ -448,7 +525,7 @@ def run_consolidate(campaign_id: str, school_id: str) -> dict:
         for r in data["inbounds"]:
             has_p, has_r = analyze_inbound(r.get("body") or "", r.get("reason"))
             ts_str = r.get("received_at")
-            is_dyn = not r.get("student_id") or r.get("student_id") != sid
+            is_dyn = not r.get("student_id") or r.get("student_id") != data["student"].get("id")
             events.append(ChatEvent(
                 timestamp=_parse_db_timestamp(ts_str),
                 sender="Responsável",
@@ -536,7 +613,6 @@ def run_consolidate(campaign_id: str, school_id: str) -> dict:
         resp = "SIM" if s["responded"] else "NAO"
         motivo = "SIM" if s["gave_reason"] else "NAO"
 
-        # Coletar detalhes das mensagens inbound
         inbound_texts = []
         for e in b["events"]:
             if e.type == "INBOUND":
@@ -552,6 +628,119 @@ def run_consolidate(campaign_id: str, school_id: str) -> dict:
     print("  " + "-" * 76)
     print(f"  TOTAL: {len(final_blocks)} conversas | Responderam: {responded_total} | Justificaram: {reason_total} | Sem resposta: {len(final_blocks) - responded_total}")
     print("=" * 80 + "\n")
+
+    # Log de Diagnóstico [CONSOLIDACAO]
+    principal_ids = [c["id"] for c in c_rows if c.get("campaign_type") in ["primary", "manual"] or not c.get("parent_campaign_id")]
+    followup_ids = [c["id"] for c in c_rows if c.get("campaign_type") == "followup"]
+    
+    principal_camps = [c for c in c_rows if c.get("campaign_type") in ["primary", "manual"] or not c.get("parent_campaign_id")]
+    followup_camps = [c for c in c_rows if c.get("campaign_type") == "followup"]
+    principal_name = principal_camps[0]["name"] if principal_camps else "Principal"
+    followup_name = followup_camps[0]["name"] if followup_camps else "Follow-up"
+    
+    responded_principal_count = 0
+    responded_followup_count = 0
+    recovered_count = 0
+    recovered_students = []
+
+    for skey, data in student_puzzle.items():
+        inbounds = data.get("inbounds", [])
+        inbounds_evo = data.get("inbounds_evo", [])
+        
+        resp_p = False
+        resp_f = False
+        
+        for r in inbounds:
+            c_id = r.get("campaign_id")
+            if c_id in principal_ids:
+                resp_p = True
+            elif c_id in followup_ids:
+                resp_f = True
+                
+        if not resp_p and not resp_f:
+            for r in inbounds:
+                m_id = r.get("message_id")
+                if m_id:
+                    for m in data["outbounds"]:
+                        if m.get("id") == m_id:
+                            if m.get("campaign_id") in principal_ids:
+                                resp_p = True
+                            elif m.get("campaign_id") in followup_ids:
+                                resp_f = True
+                            break
+                            
+        if (inbounds or inbounds_evo) and not resp_p and not resp_f:
+            followup_sent_at = None
+            for m in data["outbounds"]:
+                if m.get("campaign_id") in followup_ids and (m.get("sent_at") or m.get("created_at")):
+                    followup_sent_at = _parse_db_timestamp(m.get("sent_at") or m.get("created_at"))
+                    break
+            
+            replied_in_followup = False
+            for r in inbounds:
+                r_ts = _parse_db_timestamp(r.get("received_at"))
+                if followup_sent_at and r_ts >= followup_sent_at:
+                    replied_in_followup = True
+            for e in inbounds_evo:
+                if followup_sent_at and e.timestamp >= followup_sent_at:
+                    replied_in_followup = True
+                    
+            if replied_in_followup:
+                resp_f = True
+                replied_in_principal = False
+                for r in inbounds:
+                    r_ts = _parse_db_timestamp(r.get("received_at"))
+                    if not followup_sent_at or r_ts < followup_sent_at:
+                        replied_in_principal = True
+                for e in inbounds_evo:
+                    if not followup_sent_at or e.timestamp < followup_sent_at:
+                        replied_in_principal = True
+                resp_p = replied_in_principal
+            else:
+                resp_p = True
+
+        if resp_p:
+            responded_principal_count += 1
+        if resp_f:
+            responded_followup_count += 1
+        if resp_f and not resp_p:
+            recovered_count += 1
+            student_name = data["student"].get("name") or "Aluno ?"
+            recovered_students.append(student_name)
+
+    # Bloco DIVERGENCIA (RF-09)
+    divergencia_lines = [
+        "\n[DIVERGENCIA]",
+        "",
+        "Campanhas analisadas:",
+        f"- {principal_name}",
+        f"- {followup_name}",
+        "",
+        f"Respondidos principal: {responded_principal_count}",
+        f"Respondidos follow-up: {responded_followup_count}",
+        "",
+        f"Respondidos consolidados: {responded_total}",
+        "",
+        f"Recuperados exclusivamente pelo follow-up: {recovered_count}",
+        "",
+        "Alunos recuperados:"
+    ]
+    for name in sorted(recovered_students):
+        divergencia_lines.append(f"- {name}")
+    divergencia_str = "\n".join(divergencia_lines)
+
+    print(f"\n[CONSOLIDACAO]")
+    print(f"Alunos únicos: {len(final_blocks)}")
+    print(f"Responderam: {responded_total}")
+    print(f"Justificaram: {reason_total}")
+    print(f"Sem resposta: {len(final_blocks) - responded_total}")
+    print(f"\nOrigem:")
+    print(f"Principal: {responded_principal_count}")
+    print(f"Follow-up: {responded_followup_count}")
+    print(f"\nRespostas recuperadas do Follow-up: {recovered_count}\n")
+    print(divergencia_str)
+    
+    txt_lines.append(divergencia_str)
     
     md_lines = [
         f"# FECHAMENTO OPERACIONAL — {campaign_name}",
@@ -606,7 +795,8 @@ def run_consolidate(campaign_id: str, school_id: str) -> dict:
         "sem_resposta": len(final_blocks) - responded_total,
         "evolution_encontrados": evo_responded,
         "arquivos": [f"{file_stem}.txt", f"{file_stem}.md"],
-        "final_blocks": final_blocks
+        "final_blocks": final_blocks,
+        "divergencia_str": divergencia_str
     }
 
 def main():

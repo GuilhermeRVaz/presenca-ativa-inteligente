@@ -47,7 +47,7 @@ class AIInteractionRoutesTests(unittest.TestCase):
             cost=0.00005
         )
 
-    @patch("app.api.routes.build_repository")
+    @patch("app.api.routes.build_repository_internal")
     def test_get_session_context_endpoint_success(self, mock_build_repo) -> None:
         mock_repo = MagicMock()
         mock_repo.get_conversation_context.return_value = {
@@ -73,7 +73,41 @@ class AIInteractionRoutesTests(unittest.TestCase):
         mock_repo.get_conversation_context.assert_called_once_with(
             school_id="school-1",
             sender_jid="12345@s.whatsapp.net",
-            limit=5
+            limit=5,
+            student_id=None
+        )
+
+    @patch("app.api.routes.build_repository_internal")
+    def test_get_session_context_endpoint_success_with_student_id(self, mock_build_repo) -> None:
+        mock_repo = MagicMock()
+        mock_repo.get_conversation_context.return_value = {
+            "student_name": "João da Silva",
+            "last_reason": "ILLNESS",
+            "status": "resolved",
+            "messages": [
+                {"text": "ele está doente", "sender": "guardian", "timestamp": "2026-05-22T12:00:00Z"}
+            ]
+        }
+        mock_build_repo.return_value = mock_repo
+
+        response = self.client.get(
+            "/students/session_context",
+            params={
+                "sender_jid": "12345@s.whatsapp.net",
+                "school_id": "school-1",
+                "student_id": "student-123"
+            }
+        )
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertEqual(data["student_name"], "João da Silva")
+        self.assertEqual(data["last_reason"], "ILLNESS")
+        self.assertEqual(data["status"], "resolved")
+        mock_repo.get_conversation_context.assert_called_once_with(
+            school_id="school-1",
+            sender_jid="12345@s.whatsapp.net",
+            limit=5,
+            student_id="student-123"
         )
 
 if __name__ == "__main__":

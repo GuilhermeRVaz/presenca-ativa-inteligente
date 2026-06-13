@@ -84,6 +84,38 @@ class EvolutionGateway:
             provider_message_id=self._extract_provider_message_id(data),
         )
 
+    def send_presence(
+        self, *, to_jid: str, presence: str = "composing", delay: int = 2000, dry_run: bool = False
+    ) -> SendResult:
+        if dry_run:
+            return SendResult(success=True, provider_message_id=None, mock=True)
+
+        self._validate_config()
+
+        if "@" not in to_jid:
+            number = f"{to_jid}@s.whatsapp.net"
+        else:
+            number = to_jid
+
+        payload = {"number": number, "presence": presence, "delay": delay}
+        try:
+            with httpx.Client(timeout=settings.evolution_timeout_seconds) as client:
+                response = client.post(
+                    self._send_url("chat/sendPresence"),
+                    headers=self._headers(),
+                    json=payload,
+                )
+        except httpx.HTTPError as exc:
+            return SendResult(success=False, error=str(exc))
+
+        data = self._json(response)
+        if response.status_code not in (200, 201) or "error" in response.text.lower():
+            return SendResult(success=False, error=response.text)
+        return SendResult(
+            success=True,
+            provider_message_id=None,
+        )
+
     def _validate_config(self) -> None:
         missing = [
             name

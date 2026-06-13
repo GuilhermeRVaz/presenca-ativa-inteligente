@@ -23,6 +23,12 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
+import io
+# Force UTF-8 stdout/stderr for Windows console
+if sys.platform.startswith("win"):
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace", line_buffering=True)
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace", line_buffering=True)
+
 
 class Colors:
     GREEN = '\033[92m'
@@ -83,13 +89,16 @@ def _get_campaign_info(repo, campaign_id):
     return {"name": name, "absence_days": absence_days}
 
 
-def run_orchestrator(campaign_id=None, skip_backfill=False):
+def run_orchestrator(campaign_id=None, skip_backfill=False, day=None, month=None, year=None):
     """
     Orquestra a geracao de todos os relatorios de uma campanha.
 
     Args:
         campaign_id: UUID da campanha. Se None, usa a mais recente.
         skip_backfill: Se True, pula o mapeamento de LIDs.
+        day: Dia das faltas a filtrar (opcional).
+        month: Mês das faltas a filtrar (opcional).
+        year: Ano das faltas a filtrar (opcional).
     """
     from app.core.config import settings
 
@@ -98,32 +107,57 @@ def run_orchestrator(campaign_id=None, skip_backfill=False):
 
     # ── Identificar campanha ──────────────────────────────────────────────
     if not campaign_id:
-        print(f"{Colors.CYAN}Buscando campanha mais recente...{Colors.RESET}")
-        camp = _find_latest_campaign(repo)
-        if not camp:
-            print(f"{Colors.RED}ERRO: Nenhuma campanha encontrada no banco.{Colors.RESET}")
-            return None
-        
-        absence_days = camp["absence_days"]
-        # Buscar todas as campanhas da mesma data de falta para consolidar automaticamente
-        operation = lambda: (
-            repo.client.schema("busca_ativa_v2")
-            .table("campaigns")
-            .select("id, name")
-            .eq("absence_days", absence_days)
-            .execute()
-        )
-        same_day_camps = repo._execute_with_retry(operation, operation="find_same_day_campaigns")
-        same_day_data = same_day_camps.data or []
-        if len(same_day_data) > 1:
-            campaign_ids = [c["id"] for c in same_day_data]
-            campaign_name = " + ".join(c["name"] for c in same_day_data if c.get("name"))
+        if day:
+            from datetime import date
+            today = date.today()
+            m = month or today.month
+            y = year or today.year
+            absence_days = f"{day:02d}/{m:02d}/{y}"
+            
+            # Buscar campanhas desse dia
+            operation = lambda: (
+                repo.client.schema("busca_ativa_v2")
+                .table("campaigns")
+                .select("id, name")
+                .eq("absence_days", absence_days)
+                .execute()
+            )
+            camps_res = repo._execute_with_retry(operation, operation="find_campaigns_by_date")
+            camps = camps_res.data or []
+            if not camps:
+                print(f"{Colors.RED}ERRO: Nenhuma campanha encontrada para o dia {absence_days}.{Colors.RESET}")
+                return None
+            campaign_ids = [c["id"] for c in camps]
+            campaign_name = " + ".join(c["name"] for c in camps if c.get("name"))
             campaign_id = ",".join(campaign_ids)
-            print(f"{Colors.GREEN}AUTO-CONSOLIDAÇÃO: Encontradas {len(campaign_ids)} campanhas para a data {absence_days}!{Colors.RESET}")
+            print(f"{Colors.GREEN}Filtro por dia ativo: Encontradas {len(campaign_ids)} campanhas para a data {absence_days}!{Colors.RESET}")
         else:
-            campaign_id = camp["id"]
-            campaign_name = camp["name"]
-            campaign_ids = [campaign_id]
+            print(f"{Colors.CYAN}Buscando campanha mais recente...{Colors.RESET}")
+            camp = _find_latest_campaign(repo)
+            if not camp:
+                print(f"{Colors.RED}ERRO: Nenhuma campanha encontrada no banco.{Colors.RESET}")
+                return None
+            
+            absence_days = camp["absence_days"]
+            # Buscar todas as campanhas da mesma data de falta para consolidar automaticamente
+            operation = lambda: (
+                repo.client.schema("busca_ativa_v2")
+                .table("campaigns")
+                .select("id, name")
+                .eq("absence_days", absence_days)
+                .execute()
+            )
+            same_day_camps = repo._execute_with_retry(operation, operation="find_same_day_campaigns")
+            same_day_data = same_day_camps.data or []
+            if len(same_day_data) > 1:
+                campaign_ids = [c["id"] for c in same_day_data]
+                campaign_name = " + ".join(c["name"] for c in same_day_data if c.get("name"))
+                campaign_id = ",".join(campaign_ids)
+                print(f"{Colors.GREEN}AUTO-CONSOLIDAÇÃO: Encontradas {len(campaign_ids)} campanhas para a data {absence_days}!{Colors.RESET}")
+            else:
+                campaign_id = camp["id"]
+                campaign_name = camp["name"]
+                campaign_ids = [campaign_id]
     else:
         if isinstance(campaign_id, list):
             campaign_ids = campaign_id
@@ -210,6 +244,8 @@ def run_orchestrator(campaign_id=None, skip_backfill=False):
         stats["responderam"] = result["responderam"]
         stats["justificaram"] = result["justificaram"]
         stats["sem_resposta"] = result["sem_resposta"]
+        if "divergencia_str" in result:
+            stats["divergencia_str"] = result["divergencia_str"]
         if stats.get("sent"):
             stats["rate"] = result["responderam"] / stats["sent"]
     except Exception as e:
@@ -246,6 +282,8 @@ def run_orchestrator(campaign_id=None, skip_backfill=False):
             print(f"  Sem resposta:  {stats.get('sem_resposta', '?')}")
         if "rate" in stats:
             print(f"  Taxa:          {stats['rate']*100:.1f}%")
+        if "divergencia_str" in stats and stats["divergencia_str"]:
+            print(stats["divergencia_str"])
 
     print(f"\n{Colors.BOLD}  ARQUIVOS GERADOS{Colors.RESET}")
     print(f"  relatorios/consolidados/auditoria_*.txt")
@@ -265,10 +303,19 @@ if __name__ == "__main__":
                         help="UUID da campanha. Se nao informado, usa a mais recente.")
     parser.add_argument("--skip-backfill", action="store_true",
                         help="Pular o mapeamento de LIDs (mais rapido, porem menos respostas detectadas).")
+    parser.add_argument("--day", type=int, default=None, help="Dia das faltas da campanha.")
+    parser.add_argument("--month", type=int, default=None, help="Mês da campanha.")
+    parser.add_argument("--year", type=int, default=None, help="Ano da campanha.")
     args = parser.parse_args()
 
     try:
-        run_orchestrator(campaign_id=args.campaign_id, skip_backfill=args.skip_backfill)
+        run_orchestrator(
+            campaign_id=args.campaign_id,
+            skip_backfill=args.skip_backfill,
+            day=args.day,
+            month=args.month,
+            year=args.year
+        )
     except Exception as e:
         print(f"\n{Colors.RED}ERRO CRITICO: {e}{Colors.RESET}")
         import traceback

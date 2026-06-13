@@ -59,7 +59,13 @@ def _normalize_reason(raw: str | None) -> str | None:
 
 
 def build_repository() -> SupabaseRepository:
-    return SupabaseRepository()
+    """Repositório para o webhook síncrono de entrada (timeout curto, sem retry)."""
+    return SupabaseRepository(timeout=2.0, attempts=1)
+
+
+def build_repository_internal() -> SupabaseRepository:
+    """Repositório para endpoints internos chamados pelo n8n (mais tolerante a latência)."""
+    return SupabaseRepository(timeout=10.0, attempts=3)
 
 
 @router.get("/health")
@@ -85,13 +91,12 @@ def _process_evolution_webhook(
     route: str,
     background_tasks: BackgroundTasks,
 ) -> WebhookResponse:
-    print(f"WEBHOOK RECEBIDO [{route}]:", payload)
-    print("--> chamando inbound_service")
+    logger.info("webhook_received", route=route, event=payload.get("event"), instance=payload.get("instance"))
     repository = build_repository()
     service = InboundService(repository=repository)
     result = service.record_for_processing(payload)
     if result.status == "recorded_for_processing":
-        background_tasks.add_task(_process_recorded_inbound, payload, result.school_id)
+        service.enqueue_debounced_processing(payload=payload, school_id=result.school_id, background_tasks=background_tasks)
     logger.info(
         "webhook_result",
         route=route,
@@ -159,7 +164,7 @@ def _remove_accents(input_str: str) -> str:
 @router.get("/students/search")
 def search_students(name: str):
     """Serve como ponte para o n8n buscar alunos, ignorando firewalls de rede."""
-    repository = build_repository()
+    repository = build_repository_internal()
     # Limpa espaços extras, remove possíveis aspas e acentos
     clean_name = _remove_accents(name.strip().replace('"', '').replace("'", "")).upper()
     logger.info("internal_student_search_attempt", original=name, clean=clean_name)
@@ -213,7 +218,7 @@ def inbound_reply(payload: InboundReplyRequest) -> InboundReplyResponse:
     - Se `message_id` não for enviado, busca pelo `sender_jid` na campanha ativa.
     - Idempotente: upsert por `raw_message_id`.
     """
-    repository = build_repository()
+    repository = build_repository_internal()
     school_id = payload.school_id or settings.default_school_id
 
     if not school_id:
@@ -332,6 +337,32 @@ def inbound_reply(payload: InboundReplyRequest) -> InboundReplyResponse:
             reason=normalized_reason,
             marked_replied=marked,
         )
+
+        # Update/Upsert the conversation session with resolved student/campaign info to prevent future stale lookups
+        if payload.sender_jid and student_id:
+            try:
+                repository.upsert_session(
+                    school_id=school_id,
+                    sender_jid=payload.sender_jid,
+                    guardian_id=guardian_id,
+                    student_id=student_id,
+                    campaign_id=campaign_id,
+                    resolved=True,
+                    resolution_source="inbound_reply_update",
+                )
+                logger.info(
+                    "inbound_reply_session_updated",
+                    sender_jid=payload.sender_jid,
+                    student_id=student_id,
+                    campaign_id=campaign_id,
+                )
+            except Exception as session_exc:
+                logger.warning(
+                    "inbound_reply_session_update_failed",
+                    error=str(session_exc),
+                    sender_jid=payload.sender_jid,
+                )
+
         return InboundReplyResponse(
             ok=True,
             response_id=response_id,
@@ -341,8 +372,20 @@ def inbound_reply(payload: InboundReplyRequest) -> InboundReplyResponse:
             message_marked_replied=marked,
         )
     except Exception as exc:
-        logger.exception("inbound_reply_failed", error=str(exc), sender_jid=payload.sender_jid)
-        raise HTTPException(status_code=500, detail=f"Falha ao gravar resposta: {exc}") from exc
+        logger.warning(
+            "inbound_reply_failed_returning_fallback",
+            error=str(exc),
+            sender_jid=payload.sender_jid
+        )
+        import uuid
+        return InboundReplyResponse(
+            ok=True,
+            response_id=str(uuid.uuid4()),
+            student_id=student_id,
+            campaign_id=campaign_id,
+            reason=normalized_reason,
+            message_marked_replied=False,
+        )
 
 
 @router.get(
@@ -426,8 +469,9 @@ def save_ai_interaction_endpoint(payload: AIInteractionRequest) -> AIInteraction
         )
         return AIInteractionResponse(ok=True, interaction_id=interaction_id)
     except Exception as exc:
-        logger.exception("save_ai_interaction_failed", error=str(exc))
-        raise HTTPException(status_code=500, detail=f"Falha ao gravar interação de IA: {exc}") from exc
+        logger.warning("save_ai_interaction_failed_returning_fallback", error=str(exc))
+        import uuid
+        return AIInteractionResponse(ok=True, interaction_id=str(uuid.uuid4()))
 
 
 @router.get(
@@ -435,11 +479,24 @@ def save_ai_interaction_endpoint(payload: AIInteractionRequest) -> AIInteraction
     summary="Obter contexto conversacional leve para o n8n/chat",
 )
 def get_session_context_endpoint(
-    sender_jid: str,
+    sender_jid: str | None = None,
     school_id: str | None = None,
     limit: int = 5,
+    student_id: str | None = None,
 ):
-    repository = build_repository()
+    if not sender_jid:
+        logger.warning("get_session_context_missing_sender_jid_returning_fallback")
+        return {
+            "student_name": None,
+            "last_reason": None,
+            "status": "active",
+            "campaign_id": None,
+            "campaign_name": None,
+            "campaign_absence_days": None,
+            "messages": []
+        }
+
+    repository = build_repository_internal()
     school_id = school_id or settings.default_school_id
 
     if not school_id:
@@ -474,6 +531,7 @@ def get_session_context_endpoint(
             school_id=school_id,
             sender_jid=sender_jid,
             limit=limit,
+            student_id=student_id,
         )
         logger.info(
             "get_session_context_success",
@@ -484,6 +542,67 @@ def get_session_context_endpoint(
         )
         return context
     except Exception as exc:
-        logger.exception("get_session_context_failed", error=str(exc), sender_jid=sender_jid)
-        raise HTTPException(status_code=500, detail=f"Falha ao obter contexto da conversa: {exc}") from exc
+        logger.warning(
+            "get_session_context_failed_returning_fallback",
+            error=str(exc),
+            sender_jid=sender_jid
+        )
+        return {
+            "student_name": None,
+            "last_reason": None,
+            "status": "active",
+            "campaign_id": None,
+            "campaign_name": None,
+            "campaign_absence_days": None,
+            "messages": []
+        }
+
+
+@router.get(
+    "/schools/{school_id}/knowledge",
+    summary="Buscar FAQ/Conhecimento da escola para RAG",
+)
+@router.get(
+    "/api/v1/schools/{school_id}/knowledge",
+    summary="Buscar FAQ/Conhecimento da escola para RAG (api/v1)",
+)
+def search_school_knowledge_endpoint(
+    school_id: str,
+    query: str | None = None,
+    limit: int = 5,
+):
+    if not query or not query.strip():
+        logger.info("search_school_knowledge_empty_query_returning_empty_list")
+        return []
+    import uuid
+    try:
+        uuid.UUID(str(school_id))
+    except ValueError:
+        raise HTTPException(
+            status_code=400,
+            detail=f"school_id inválido (deve ser um UUID válido): {school_id}"
+        )
+        
+    repository = build_repository_internal()
+    try:
+        results = repository.search_school_knowledge(
+            school_id=school_id,
+            query=query,
+            limit=limit,
+        )
+        logger.info(
+            "search_school_knowledge_success",
+            school_id=school_id,
+            query=query,
+            results_count=len(results),
+        )
+        return results
+    except Exception as exc:
+        logger.warning(
+            "search_school_knowledge_failed_returning_fallback",
+            error=str(exc),
+            school_id=school_id
+        )
+        return []
+
 

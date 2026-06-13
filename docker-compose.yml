@@ -26,6 +26,8 @@ services:
       - DB_POSTGRESDB_DATABASE=${POSTGRES_DB:-busca_ativa_local}
       - DB_POSTGRESDB_USER=${POSTGRES_USER:-postgres}
       - DB_POSTGRESDB_PASSWORD=${POSTGRES_PASSWORD:-postgres}
+    env_file:
+      - .env
     depends_on:
       - db
 

@@ -31,6 +31,8 @@ class Settings:
     # Feature Flags
     use_session_correlation: bool = os.getenv("USE_SESSION_CORRELATION", "true").lower() == "true"
     enable_conversational_agent: bool = os.getenv("ENABLE_CONVERSATIONAL_AGENT", "true").lower() == "true"
+    allow_unresolved_conversational_agent: bool = os.getenv("ALLOW_UNRESOLVED_CONVERSATIONAL_AGENT", "true").lower() == "true"
+
 
 
 settings = Settings()

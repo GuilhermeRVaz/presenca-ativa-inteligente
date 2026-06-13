@@ -72,12 +72,13 @@ async def run(selected_month: int | None = None):
 
         print("\nIniciando navegação a partir da Home...")
         
-        # Passos iniciais
-        await page.get_by_title("Diário de Classe").first.click()
-        await asyncio.sleep(1.5)
-        await page.get_by_role("link", name="Frequência").first.click()
-        await asyncio.sleep(1.5)
-        await page.get_by_role("link", name="Consulta de Frequência").click()
+        # Passos iniciais a partir do Home
+        print("Clicando no Diário de Classe...")
+        await page.locator("a.diario-classe-home").click()
+        await asyncio.sleep(2)
+        
+        print("Clicando em Consulta...")
+        await page.locator("a[href='/diario-classe__frequencia___consulta']").click()
         await asyncio.sleep(2)
 
         turmas = [
@@ -90,19 +91,20 @@ async def run(selected_month: int | None = None):
         for turma_nome in turmas:
             print(f"\n--- Processando: {turma_nome} ---")
             try:
-                # Selecionar Ensino
-                await page.get_by_role("textbox", name="Selecione").first.click()
+                # Selecionar Ensino (usando a ordem física estável dos inputs de dropdown)
+                await page.locator("div.dropdown-input-container input").first.click()
                 await page.get_by_text("ENSINO FUNDAMENTAL DE 9 ANOS", exact=True).click()
                 await asyncio.sleep(1)
 
-                # Selecionar Turma
-                await page.get_by_role("textbox", name="Selecione").nth(1).click()
+                # Selecionar Turma (usando a ordem física estável dos inputs de dropdown)
+                await page.locator("div.dropdown-input-container input").nth(1).click()
+                await asyncio.sleep(1)
                 texto_busca = "°" + turma_nome.split("°")[1]
                 await page.get_by_text(texto_busca, exact=False).click()
                 await asyncio.sleep(1)
 
                 # Abrir página da Turma
-                await page.get_by_role("link", name=turma_nome.title(), exact=False).first.click()
+                await page.locator("a.item").filter(has_text=turma_nome.title()).first.click()
                 await asyncio.sleep(2)
 
                 # Seleciona o mes desejado e o tipo de consulta "Faltas".
@@ -111,29 +113,33 @@ async def run(selected_month: int | None = None):
                 await page.locator("#slTpConsulta").select_option("0")
                 
                 # Filtrar
-                await page.get_by_role("button", name="Filtrar").click()
+                await page.locator("button.botao-filtro").click()
                 await asyncio.sleep(5)
 
                 # Download Excel
                 print("Baixando Excel...")
                 async with page.expect_download(timeout=60000) as download_info:
-                    await page.get_by_role("button", name="Gerar Excel").click()
-                
+                    # Resolve strict mode clicando especificamente no botão que tem a imagem do Excel
+                    await page.locator("button.btn-downloads-mapao").filter(has=page.locator("img[src*='xls']")).click()
+
                 download = await download_info.value
                 nome_limpo = turma_nome.replace(" ", "_").replace("°", "")
                 caminho = f"relatorios/Faltas_{nome_limpo}.xlsx"
                 await download.save_as(caminho)
                 
                 # Fechar popup e voltar
-                await page.get_by_role("button", name="OK").click()
+                await page.locator("button.btn-icon").filter(has_text="OK").click()
                 await asyncio.sleep(1)
-                await page.get_by_role("button", name=" Voltar").click()
+                await page.locator("button.botao-voltar").click()
                 await asyncio.sleep(2)
 
             except Exception as e:
-                print(f"⚠️ Erro na turma {turma_nome}. A saltar para a próxima...")
+                print(f"⚠️ Erro na turma {turma_nome}: {e}")
+                import traceback
+                traceback.print_exc()
+
                 try:
-                    await page.get_by_role("button", name=" Voltar").click(timeout=3000)
+                    await page.locator("button.botao-voltar").click(timeout=3000)
                 except:
                     await page.reload() # Se tudo falhar, dá refresh
                     await asyncio.sleep(3)

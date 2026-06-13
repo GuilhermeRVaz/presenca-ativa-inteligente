@@ -10,6 +10,50 @@ except ImportError:  # pragma: no cover
     create_client = None  # type: ignore[assignment]
     SyncClientOptions = None  # type: ignore[assignment]
 
+# ──────────────────────────────────────────────────────────────────────────────
+# MONKEY-PATCH: Retentativas globais para qualquer consulta Supabase/Postgrest
+# ──────────────────────────────────────────────────────────────────────────────
+try:
+    from postgrest._sync.request_builder import SyncQueryRequestBuilder
+    
+    _original_postgrest_execute = SyncQueryRequestBuilder.execute
+    
+    def _robust_postgrest_execute(self, *args, **kwargs):
+        import time
+        last_error = None
+        for attempt in range(1, 4):
+            try:
+                return _original_postgrest_execute(self, *args, **kwargs)
+            except Exception as exc:
+                last_error = exc
+                err_str = str(exc).lower()
+                exc_class = exc.__class__.__name__
+                
+                is_network_err = (
+                    "connect" in err_str or 
+                    "timeout" in err_str or 
+                    "getaddrinfo" in err_str or 
+                    "connection" in err_str or
+                    "http" in exc_class.lower() or
+                    "timeout" in exc_class.lower() or
+                    "error" in exc_class.lower()
+                )
+                if "apierror" in exc_class.lower() or "postgrest" in exc.__class__.__module__:
+                    is_network_err = False
+                    
+                if not is_network_err:
+                    raise exc
+                    
+                if attempt >= 3:
+                    break
+                time.sleep(2 ** attempt)
+        raise last_error
+
+    SyncQueryRequestBuilder.execute = _robust_postgrest_execute
+except Exception:
+    pass
+# ──────────────────────────────────────────────────────────────────────────────
+
 from app.core.config import settings
 from app.domain.models import (
     CampaignRecord,
@@ -23,23 +67,39 @@ from app.domain.models import (
 
 
 class SupabaseRepository:
-    def __init__(self) -> None:
-        self._client = None
+    _offline_until = 0.0
+    # Cache singleton de clients por timeout: evita o custo de ~1.4s do create_client() a cada request
+    _cached_clients: dict[float, Any] = {}
+
+    @classmethod
+    def mark_offline(cls, duration: float = 30.0):
+        cls._offline_until = time.time() + duration
+
+    @classmethod
+    def is_offline(cls) -> bool:
+        return time.time() < cls._offline_until
+
+    def __init__(self, *, timeout: float = 15.0, attempts: int = 3) -> None:
+        self.timeout = timeout
+        self.attempts = attempts
 
     @property
     def client(self):
-        if self._client is None:
+        if self.is_offline():
+            raise RuntimeError("Supabase client is offline (marked offline temporarily).")
+        # Retorna client em cache se já existir para este timeout
+        if self.timeout not in SupabaseRepository._cached_clients:
             if not settings.supabase_url or not settings.supabase_key:
                 raise RuntimeError("SUPABASE_URL and SUPABASE_KEY are required")
             if create_client is None:
                 raise RuntimeError("supabase-py is not installed")
-            options = SyncClientOptions(postgrest_client_timeout=300.0)
-            self._client = create_client(
+            options = SyncClientOptions(postgrest_client_timeout=self.timeout)
+            SupabaseRepository._cached_clients[self.timeout] = create_client(
                 settings.supabase_url,
                 settings.supabase_key,
                 options=options,
             )
-        return self._client
+        return SupabaseRepository._cached_clients[self.timeout]
 
     def record_raw_inbound(
         self,
@@ -838,17 +898,19 @@ class SupabaseRepository:
         school_id: str,
         sender_jid: str,
         limit: int = 5,
+        student_id: str | None = None,
     ) -> dict[str, Any]:
         import concurrent.futures
         import logging
         logger = logging.getLogger(__name__)
 
         wa_jids = [sender_jid]
+        reply_to_jid = sender_jid
         guardian_id = None
-        student_id = None
+        student_id = student_id
         student_name = None
         last_reason = None
-        status = "active"
+        status = "active" if not student_id else "resolved"
 
         # Batch 1 functions to run in parallel
         def get_map():
@@ -893,31 +955,28 @@ class SupabaseRepository:
             except Exception:
                 return None
 
-        # Execute Batch 1 in parallel
-        with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
-            future_map = executor.submit(self._execute_with_retry, get_map, operation="get_conversation_context_identity")
-            future_session = executor.submit(self._execute_with_retry, get_session, operation="get_conversation_context_session")
-            future_responses = executor.submit(self._execute_with_retry, get_all_responses_by_jid, operation="get_conversation_context_responses")
-            future_active_camp = executor.submit(get_active_campaign)
-
-            map_res = future_map.result()
-            session_res = future_session.result()
-            responses_res = future_responses.result()
-            active_campaign_id = future_active_camp.result()
+        # Execute Batch 1 sequentially to avoid httpx.Client thread-safety socket issues
+        map_res = self._execute_with_retry(get_map, operation="get_conversation_context_identity")
+        session_res = self._execute_with_retry(get_session, operation="get_conversation_context_session")
+        responses_res = self._execute_with_retry(get_all_responses_by_jid, operation="get_conversation_context_responses")
+        active_campaign_id = get_active_campaign()
 
         # Parse Batch 1 results
         if map_res.data:
             mapped_wa = map_res.data[0].get("wa_jid")
             if mapped_wa and mapped_wa not in wa_jids:
                 wa_jids.append(mapped_wa)
+            if sender_jid.endswith("@lid") and mapped_wa:
+                reply_to_jid = mapped_wa
             guardian_id = map_res.data[0].get("guardian_id")
 
         campaign_id = None
         if session_res.data:
-            student_id = session_res.data[0].get("student_id")
+            if not student_id:
+                student_id = session_res.data[0].get("student_id")
             campaign_id = session_res.data[0].get("campaign_id")
             resolved = session_res.data[0].get("resolved")
-            if resolved:
+            if resolved or student_id:
                 status = "resolved"
 
         if not campaign_id:
@@ -1019,16 +1078,11 @@ class SupabaseRepository:
                 query = query.in_("wa_jid", wa_jids)
             return query.order("sent_at", desc=True).limit(limit).execute()
 
-        with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
-            future_camp_details = executor.submit(safe_get_campaign_details)
-            future_student_name = executor.submit(safe_get_student_name)
-            future_student_reason = executor.submit(safe_get_last_reason_by_student)
-            future_outbounds = executor.submit(self._execute_with_retry, get_outbounds, operation="get_outbound_messages")
-
-            camp_res = future_camp_details.result()
-            stu_res = future_student_name.result()
-            reason_res = future_student_reason.result()
-            outbound_res = future_outbounds.result()
+        # Execute Batch 2 sequentially to avoid httpx.Client thread-safety socket issues
+        camp_res = safe_get_campaign_details()
+        stu_res = safe_get_student_name()
+        reason_res = safe_get_last_reason_by_student()
+        outbound_res = self._execute_with_retry(get_outbounds, operation="get_outbound_messages")
 
         # Parse Batch 2 results
         if camp_res and camp_res.data:
@@ -1061,7 +1115,10 @@ class SupabaseRepository:
         last_msgs.reverse()
 
         return {
+            "student_id": student_id,
             "student_name": student_name,
+            "wa_jid": next((jid for jid in wa_jids if jid and not jid.endswith("@lid")), None),
+            "reply_to_jid": reply_to_jid,
             "last_reason": last_reason,
             "status": status,
             "campaign_id": campaign_id,
@@ -1149,6 +1206,72 @@ class SupabaseRepository:
     def _short_protocol(tracking_ref: str) -> str:
         return hashlib.sha256(tracking_ref.encode("utf-8")).hexdigest()[:6].upper()
 
+    def search_school_knowledge(
+        self,
+        *,
+        school_id: str,
+        query: str,
+        limit: int = 5,
+    ) -> list[dict[str, Any]]:
+        if not query:
+            return []
+        
+        # Clean query, split into terms
+        import re
+        import unicodedata
+
+        def normalize_txt(text: str) -> str:
+            nfkd = unicodedata.normalize('NFKD', text)
+            return "".join([c for c in nfkd if not unicodedata.combining(c)]).lower()
+
+        normalized_query = normalize_txt(query)
+        terms = [t.strip() for t in re.split(r'[\s,\.\?\!\-\:\/]+', normalized_query) if len(t.strip()) > 2]
+        
+        # If no significant terms, return empty
+        if not terms:
+            return []
+
+        def execute_query():
+            return (
+                self.client.schema("busca_ativa_v2")
+                .table("school_knowledge")
+                .select("category, question, answer")
+                .eq("school_id", school_id)
+                .eq("is_active", True)
+                .execute()
+            )
+
+        try:
+            # attempts=1: falha rápida sem sleep de retry — o endpoint já retorna lista vazia como fallback
+            res = self._execute_with_retry(execute_query, operation="search_school_knowledge", attempts=1)
+            rows = res.data or []
+            
+            # Simple keyword matching and scoring
+            scored_rows = []
+            for row in rows:
+                q_text = normalize_txt(str(row.get("question") or ""))
+                a_text = normalize_txt(str(row.get("answer") or ""))
+                
+                # Count matching terms
+                score = 0
+                for term in terms:
+                    if term in q_text:
+                        score += 3  # Higher weight for questions
+                    if term in a_text:
+                        score += 1  # Lower weight for answers
+                
+                if score > 0:
+                    scored_rows.append((score, row))
+            
+            # Sort by score desc, and return top 'limit'
+            scored_rows.sort(key=lambda x: x[0], reverse=True)
+            return [item[1] for item in scored_rows[:limit]]
+        except Exception as exc:
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.error(f"search_school_knowledge_failed: {exc}", exc_info=True)
+            return []
+
     @staticmethod
     def _require_data(response: Any, operation: str) -> list[dict[str, Any]]:
         data = getattr(response, "data", None)
@@ -1156,16 +1279,27 @@ class SupabaseRepository:
             raise RuntimeError(f"Supabase {operation} failed: empty response data")
         return data
 
-    @staticmethod
     def _execute_with_retry(
-        operation_call: Any, *, operation: str, attempts: int = 5
+        self, operation_call: Any, *, operation: str, attempts: int | None = None
     ) -> Any:
+        if attempts is None:
+            attempts = self.attempts
+
+        if SupabaseRepository.is_offline():
+            raise RuntimeError(
+                f"Supabase {operation} failed: Supabase is marked offline due to previous connection issues."
+            )
+
         last_error: Exception | None = None
         for attempt in range(1, attempts + 1):
             try:
                 return operation_call()
             except Exception as exc:
                 last_error = exc
+                err_str = str(exc).lower()
+                if "connect" in err_str or "timeout" in err_str or "getaddrinfo" in err_str or "connection" in err_str:
+                    if attempts == 1:
+                        SupabaseRepository.mark_offline(30.0)
                 if attempt >= attempts:
                     break
                 time.sleep(2**attempt)

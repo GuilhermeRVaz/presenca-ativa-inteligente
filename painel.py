@@ -267,9 +267,42 @@ st.divider()
 st.header("Parâmetros da Campanha")
 st.markdown("Defina o dia da planilha SEDUC e os modos de controle do sistema.")
 
-dia = st.text_input("Dia da Campanha (Filtro para Fase 1 / 1.5)", value="4", help="O dia exato a ser buscado no Excel da SEDUC.")
-dry_run = st.toggle("🧪 Modo Simulação (Dry Run)", value=True, help="Executa as fases sem gravar disparos reais na API do WhatsApp.")
+col_p1, col_p2 = st.columns(2)
+with col_p1:
+    dia = st.text_input("Dia da Campanha (Filtro para Fase 1 / 1.5)", value="4", help="O dia exato a ser buscado no Excel da SEDUC.")
+    dry_run = st.toggle("🧪 Modo Simulação (Dry Run)", value=True, help="Executa as fases sem gravar disparos reais na API do WhatsApp.")
+with col_p2:
+    min_delay = st.number_input("⏱️ Intervalo Mínimo (segundos)", value=45, min_value=1, help="Tempo mínimo de espera entre mensagens (anti-ban).")
+    max_delay = st.number_input("⏱️ Intervalo Máximo (segundos)", value=120, min_value=1, help="Tempo máximo de espera entre mensagens (anti-ban).")
+
 skip_backfill = st.toggle("⚡ Pular Backfill de LIDs (mais rápido)", value=False, help="Se ligado, não varre os chats @lid do WhatsApp antes de gerar os relatórios. Menos respostas serão detectadas.")
+
+st.divider()
+
+# ==========================================
+# CAMPANHA ESPECIAL: OBMEP 2026
+# ==========================================
+st.header("🏆 Campanha Especial: OBMEP 2026 (09/06)")
+st.markdown("Campanha informativa para notificar os responsáveis dos alunos de 8ºs e 7ºs anos sobre a realização da prova da OBMEP.")
+
+col_obmep1, col_obmep2 = st.columns(2)
+with col_obmep1:
+    if st.button("📋 1. Gerar Fila da Campanha OBMEP", use_container_width=True, help="Seleciona alunos dos 8ºs e 7ºs anos no banco, escolhe mensagens randomizadas e enfileira as mensagens como 'pending'."):
+        cmd = [sys.executable, "-u", "scripts/create_obmep_campaign.py"]
+        if dry_run:
+            cmd.append("--dry-run")
+        run_script_live(cmd, "Carga da Campanha OBMEP")
+
+with col_obmep2:
+    if st.button("🚀 2. Disparar Mensagens da OBMEP", use_container_width=True, type="primary", help="Inicia o orquestrador especificamente para a campanha da OBMEP com pacing customizado."):
+        cmd = [
+            sys.executable, "-u", "scripts/campaign_orchestrator.py",
+            "--min-delay", str(int(min_delay)),
+            "--max-delay", str(int(max_delay))
+        ]
+        if dry_run:
+            cmd.append("--dry-run")
+        run_script_live(cmd, "Disparos da Campanha OBMEP")
 
 st.divider()
 
@@ -324,7 +357,11 @@ col_exec1, col_exec2 = st.columns(2)
 
 with col_exec1:
     if st.button("🚀 Iniciar Orquestrador de Disparos (Fase 2)", use_container_width=True, help="Dispara as mensagens pendentes (tanto primárias quanto follow-ups) com pacing anti-ban."):
-        cmd = [sys.executable, "-u", "scripts/campaign_orchestrator.py"]
+        cmd = [
+            sys.executable, "-u", "scripts/campaign_orchestrator.py",
+            "--min-delay", str(int(min_delay)),
+            "--max-delay", str(int(max_delay))
+        ]
         if dry_run:
             cmd.append("--dry-run")
         run_script_live(cmd, "Fase 2: Orquestração de Disparos")
@@ -332,6 +369,8 @@ with col_exec1:
 with col_exec2:
     if st.button("📊 Gerar Relatórios Consolidados (Fase 3)", use_container_width=True, help="Varre respostas recebidas e consolida as estatísticas finais da campanha."):
         cmd = [sys.executable, "-u", "scripts/campaign_reporter.py"]
+        if dia:
+            cmd.extend(["--day", str(dia)])
         if skip_backfill:
             cmd.append("--skip-backfill")
         run_script_live(cmd, "Fase 3: Relatórios Consolidados")

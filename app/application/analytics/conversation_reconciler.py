@@ -47,7 +47,10 @@ class ConversationReconciler:
                     responses_query = responses_query.in_("campaign_id", campaign_ids)
                 else:
                     responses_query = responses_query.eq("campaign_id", campaign_id)
-            responses_query = responses_query.execute()
+            responses_query = self.repository._execute_with_retry(
+                lambda: responses_query.execute(),
+                operation="reconcile_get_unresolved"
+            )
 
             unresolved = responses_query.data or []
             metrics["unresolved_found"] = len(unresolved)
@@ -110,12 +113,15 @@ class ConversationReconciler:
                     "identity_confidence": "HIGH",
                 }
 
-                (
-                    self.client.schema("busca_ativa_v2")
-                    .table("responses")
-                    .update(update_data)
-                    .eq("id", resp["id"])
-                    .execute()
+                self.repository._execute_with_retry(
+                    lambda: (
+                        self.client.schema("busca_ativa_v2")
+                        .table("responses")
+                        .update(update_data)
+                        .eq("id", resp["id"])
+                        .execute()
+                    ),
+                    operation="reconcile_update_response"
                 )
 
                 try:
@@ -186,11 +192,14 @@ class ConversationReconciler:
         else:
             query = query.in_("wa_jid", candidate_jids)
 
-        result = (
-            query.gte("created_at", window_start)
-            .order("created_at", desc=True)
-            .limit(3)
-            .execute()
+        result = self.repository._execute_with_retry(
+            lambda: (
+                query.gte("created_at", window_start)
+                .order("created_at", desc=True)
+                .limit(3)
+                .execute()
+            ),
+            operation="reconcile_find_recent_outbound",
         )
         outbounds = result.data or []
         if not outbounds:
@@ -204,15 +213,17 @@ class ConversationReconciler:
     def _candidate_jids_for_sender(self, sender_jid: str) -> list[str]:
         candidates = {sender_jid}
         try:
-            identity_rows = (
-                self.client.schema("busca_ativa_v2")
-                .table("phone_identity_map")
-                .select("wa_jid, lid_jid")
-                .or_(f"lid_jid.eq.{sender_jid},wa_jid.eq.{sender_jid}")
-                .execute()
-                .data
-                or []
+            identity_res = self.repository._execute_with_retry(
+                lambda: (
+                    self.client.schema("busca_ativa_v2")
+                    .table("phone_identity_map")
+                    .select("wa_jid, lid_jid")
+                    .or_(f"lid_jid.eq.{sender_jid},wa_jid.eq.{sender_jid}")
+                    .execute()
+                ),
+                operation="reconcile_candidate_jids",
             )
+            identity_rows = identity_res.data or []
             for row in identity_rows:
                 if row.get("wa_jid"):
                     candidates.add(row["wa_jid"])

@@ -80,7 +80,10 @@
             }
           ]
         },
-        "options": {}
+        "options": {
+          "continueOnFail": true,
+          "timeout": 10000
+        }
       },
       "id": "supabase-search",
       "name": "Backend: Buscar Aluno",
@@ -127,7 +130,10 @@
         "sendBody": true,
         "specifyBody": "json",
         "jsonBody": "={{ { school_id: $(\"Webhook Inbound\").item.json.body.school_id, sender_jid: $(\"Webhook Inbound\").item.json.body.sender_jid, raw_message_id: $(\"Webhook Inbound\").item.json.body.raw_message_id, body: $(\"Webhook Inbound\").item.json.body.message_text, reason: $(\"Extrair Dados com IA\").item.json.output.reason, ai_confidence: $(\"Extrair Dados com IA\").item.json.output.ai_confidence, student_id: $json.id, guardian_id: $json.student_guardians?.[0]?.guardian_id, received_at: $(\"Webhook Inbound\").item.json.body.received_at } }}",
-        "options": {}
+        "options": {
+          "continueOnFail": true,
+          "timeout": 10000
+        }
       },
       "id": "backend-update",
       "name": "Backend: Atualizar Triagem",
@@ -244,7 +250,7 @@
       ]
     }
   },
-  "active": false,
+  "active": true,
   "settings": {
     "executionOrder": "v1"
   },

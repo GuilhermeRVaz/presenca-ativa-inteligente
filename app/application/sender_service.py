@@ -54,6 +54,17 @@ class SenderService:
             template_id=template_id,
             body_preview=body[:500],
         )
+        # Simula a presenca de digitando por 2 segundos antes do envio
+        self.gateway.send_presence(
+            to_jid=context.guardian.wa_jid,
+            presence="composing",
+            delay=2000,
+            dry_run=dry_run,
+        )
+        if not dry_run:
+            import time
+            time.sleep(2.0)
+
         send_result = self.gateway.send_text(
             to_jid=context.guardian.wa_jid,
             text=body,

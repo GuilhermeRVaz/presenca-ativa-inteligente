@@ -64,7 +64,12 @@
       "id": "openai-chat",
       "name": "OpenAI Chat",
       "type": "n8n-nodes-base.httpRequest",
-      "position": [500, 300]
+      "position": [500, 300],
+      "settings": {
+        "retryOnFail": true,
+        "maxTries": 3,
+        "retryInterval": 5000
+      }
     },
     {
       "parameters": {
@@ -140,7 +145,10 @@
       "id": "evolution-send",
       "name": "Evolution API Send",
       "type": "n8n-nodes-base.httpRequest",
-      "position": [1100, 300]
+      "position": [1100, 300],
+      "settings": {
+        "onError": "continue"
+      }
     },
     {
       "parameters": {
