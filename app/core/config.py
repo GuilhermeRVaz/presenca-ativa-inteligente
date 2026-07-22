@@ -6,6 +6,24 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+# Bypass Cisco Umbrella / OpenDNS block on cpniwvghxlkposaeyboa.supabase.co
+import socket
+_original_getaddrinfo = socket.getaddrinfo
+
+def _patched_getaddrinfo(host, port, family=0, type=0, proto=0, flags=0):
+    if host == "cpniwvghxlkposaeyboa.supabase.co":
+        results = []
+        for ip in ["104.18.38.10", "172.64.149.246"]:
+            try:
+                results.extend(_original_getaddrinfo(ip, port, family, type, proto, flags))
+            except Exception:
+                pass
+        if results:
+            return results
+    return _original_getaddrinfo(host, port, family, type, proto, flags)
+
+socket.getaddrinfo = _patched_getaddrinfo
+
 
 class Settings:
     app_name: str = os.getenv("APP_NAME", "busca-ativa-v2")

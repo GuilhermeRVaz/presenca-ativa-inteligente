@@ -1,456 +1,20 @@
 {
-  "name": "Busca Ativa - Chat Conversacional (RAG TESTE)",
-  "nodes": [
-    {
-      "parameters": {
-        "httpMethod": "POST",
-        "path": "chat-interaction",
-        "responseMode": "responseNode",
-        "options": {}
-      },
-      "id": "43f5a92d-959d-4ea1-808d-ce88b5f08583",
-      "name": "Webhook Chat",
-      "type": "n8n-nodes-base.webhook",
-      "typeVersion": 2.1,
-      "position": [
-        -1984,
-        4576
-      ],
-      "webhookId": "773a3960-f841-4f10-a6c4-cde88805c147"
-    },
-    {
-      "parameters": {
-        "url": "http://host.docker.internal:8000/students/session_context",
-        "sendQuery": true,
-        "queryParameters": {
-          "parameters": [
-            {
-              "name": "sender_jid",
-              "value": "={{ $json.body?.sender_jid || $json.sender_jid }}"
-            },
-            {
-              "name": "school_id",
-              "value": "={{ $json.body?.school_id || $json.school_id }}"
-            },
-            {
-              "name": "student_id",
-              "value": "={{ $json.body?.student_id || $json.student_id || \"\" }}"
-            }
-          ]
-        },
-        "options": {
-          "continueOnFail": true,
-          "timeout": 10000
-        }
-      },
-      "id": "1a680f61-4d6b-4f42-8679-ddfa9ed62be7",
-      "name": "GET Session Context",
-      "type": "n8n-nodes-base.httpRequest",
-      "typeVersion": 4.4,
-      "position": [
-        -1760,
-        4576
-      ]
-    },
-    {
-      "parameters": {
-        "method": "POST",
-        "url": "https://api.openai.com/v1/chat/completions",
-        "sendHeaders": true,
-        "headerParameters": {
-          "parameters": [
-            {
-              "name": "Authorization",
-              "value": "=Bearer {{ $env.OPENAI_API_KEY }}"
-            },
-            {
-              "name": "Content-Type",
-              "value": "application/json"
-            }
-          ]
-        },
-        "sendBody": true,
-        "specifyBody": "json",
-        "jsonBody": "={{ JSON.stringify({\n  model: \"gpt-4o-mini\",\n  messages: [\n    {\n      role: \"system\",\n      content: \"Você é a IA 1 (Classificador) da escola Décia. Seu único objetivo é classificar a intenção e o risco das mensagens recebidas e retornar estritamente um JSON.\\n\\nCampos no JSON:\\n- intent: 'JUSTIFICATIVA_FALTA' (se o responsável justifica faltas ou atrasos), 'DUVIDA_SECRETARIA' (dúvidas sobre horários, secretaria, documentos, matrículas), 'HUMANO' (solicitação explícita de falar com humano), ou 'DESCONHECIDO' (outros assuntos ou conversa fiada).\\n- category: 'DOENCA', 'TRABALHO', 'TRANSPORTE', 'FAMILIA', 'OUTRO' (se intent for JUSTIFICATIVA_FALTA), ou null caso contrário.\\n- risk_level: 'LOW' (baixo risco), 'MEDIUM' (desânimo, recorrência moderada), 'HIGH' (bullying, conflitos graves, problemas jurídicos, ameaças, agressividade, saúde mental grave).\\n- needs_human: true (se risk_level for HIGH, se houver agressividade/bullying, solicitação explícita ou tom conflituoso), ou false caso contrário.\\n- confidence: float entre 0.0 e 1.0 (grau de certeza na classificação).\\n\\nRegra de Ouro: Retorne APENAS o JSON. Não adicione texto explicativo ou markdown.\"\n    },\n    {\n      role: \"user\",\n      content: \"Contexto:\\n- Aluno: \" + ($node[\"GET Session Context\"].json.student_name || \"não identificado\") + \"\\n- Último Motivo: \" + ($node[\"GET Session Context\"].json.last_reason || \"não informado\") + \"\\n- Campanha: \" + ($node[\"GET Session Context\"].json.campaign_name || \"não informado\") + \"\\n- Dias Falta: \" + ($node[\"GET Session Context\"].json.campaign_absence_days || \"não informado\") + \"\\n\\nHistórico Recente:\\n\" + JSON.stringify($node[\"GET Session Context\"].json.messages || [], null, 2) + \"\\n\\nMensagem Atual: \" + ($node[\"Webhook Chat\"].json.message_text || $node[\"Webhook Chat\"].json.body?.message_text || \"\") + \"\\n\\nRetorne agora a classificação JSON estrita.\"\n    }\n  ],\n  response_format: { type: \"json_object\" }\n}) }}",
-        "options": {
-          "continueOnFail": true,
-          "timeout": 10000
-        }
-      },
-      "id": "6de0362e-dc55-4571-8d38-81df02591393",
-      "name": "IA 1 - Classificador",
-      "type": "n8n-nodes-base.httpRequest",
-      "typeVersion": 4.4,
-      "position": [
-        -1504,
-        5088
-      ]
-    },
-    {
-      "parameters": {
-        "mode": "runOnceForEachItem",
-        "jsCode": "let response = {\n  intent: \"DESCONHECIDO\",\n  category: null,\n  risk_level: \"LOW\",\n  needs_human: true,\n  confidence: 0.0,\n  needs_review: true,\n  handoff_reason: \"erro_classificacao\"\n};\n\ntry {\n  let content = $json.choices[0].message.content.trim();\n  if (content.startsWith(\"```json\")) {\n    content = content.substring(7);\n  }\n  if (content.endsWith(\"```\")) {\n    content = content.substring(0, content.length - 3);\n  }\n  let parsed = JSON.parse(content.trim());\n  \n  response.intent = parsed.intent || \"DESCONHECIDO\";\n  response.category = parsed.category || null;\n  response.risk_level = parsed.risk_level || \"LOW\";\n  response.needs_human = parsed.needs_human === true || parsed.needs_human === \"true\";\n  response.confidence = parseFloat(parsed.confidence) || 0.0;\n  response.needs_review = response.needs_human;\n  \n  // Se a confiança for menor que 0.75, força handoff humano\n  if (response.confidence < 0.75) {\n    response.needs_human = true;\n    response.needs_review = true;\n    response.handoff_reason = \"baixa_confianca\";\n  } else if (response.needs_human) {\n    response.handoff_reason = parsed.category || \"detectado_ia\";\n  }\n} catch (e) {\n  response.needs_human = true;\n  response.needs_review = true;\n  response.handoff_reason = \"erro_json_parse\";\n}\n\nreturn response;"
-      },
-      "id": "a2abda76-d572-4e6e-b15c-800bbb797df6",
-      "name": "Parse Classificador Segura",
-      "type": "n8n-nodes-base.code",
-      "typeVersion": 2,
-      "position": [
-        -1312,
-        4576
-      ]
-    },
-    {
-      "parameters": {
-        "mode": "expression",
-        "output": "={{ $json.needs_human === true || $json.risk_level === \"HIGH\" || $json.intent === \"HUMANO\" ? 0 : ($json.intent === \"JUSTIFICATIVA_FALTA\" ? 1 : ($json.intent === \"DUVIDA_SECRETARIA\" ? 2 : 3)) }}"
-      },
-      "id": "8cde44ec-db13-4ef1-b01c-eecefb9d58b3",
-      "name": "Roteador por Intenção",
-      "type": "n8n-nodes-base.switch",
-      "typeVersion": 3,
-      "position": [
-        -1088,
-        4544
-      ]
-    },
-    {
-      "parameters": {
-        "mode": "runOnceForEachItem",
-        "jsCode": "let input = $json;\nreturn {\n  response_text: \"Agradecemos sua mensagem. Nossa equipe registrou as informações e seguirá acompanhando o caso.\",\n  model: \"static_handoff\",\n  prompt_version: \"v1\",\n  detected_intent: input.intent || \"HUMANO\",\n  risk_level: input.risk_level || \"LOW\",\n  handoff_reason: input.handoff_reason || \"detectado_ia\"\n};"
-      },
-      "id": "5cf660f5-d2fb-456c-9bc2-86391b86de68",
-      "name": "Configurar Handoff",
-      "type": "n8n-nodes-base.code",
-      "typeVersion": 2,
-      "position": [
-        -624,
-        4272
-      ]
-    },
-    {
-      "parameters": {
-        "method": "POST",
-        "url": "http://host.docker.internal:8000/inbound/reply",
-        "sendBody": true,
-        "specifyBody": "json",
-        "jsonBody": "={{ JSON.stringify({\n  school_id: $node[\"Webhook Chat\"].json.body?.school_id || $node[\"Webhook Chat\"].json.school_id,\n  sender_jid: $node[\"Webhook Chat\"].json.body?.sender_jid || $node[\"Webhook Chat\"].json.sender_jid,\n  raw_message_id: ($node[\"Webhook Chat\"].json.body?.response_id || $node[\"Webhook Chat\"].json.response_id || $node[\"Webhook Chat\"].json.raw_message_id || $node[\"Webhook Chat\"].json.body?.raw_message_id || (\"n8n-\" + ($node[\"Webhook Chat\"].json.body?.sender_jid || $node[\"Webhook Chat\"].json.sender_jid || \"unknown\") + \"-\" + ($node[\"Webhook Chat\"].json.body?.received_at || $node[\"Webhook Chat\"].json.received_at || \"no-date\"))),\n  body: ($node[\"Webhook Chat\"].json.body?.message_text || $node[\"Webhook Chat\"].json.message_text || (($node[\"GET Session Context\"].json.messages || []).filter(m => m.text).slice(-1)[0]?.text) || \"[mensagem sem texto]\"),\n  student_id: $node[\"Webhook Chat\"].json.body?.student_id || $node[\"Webhook Chat\"].json.student_id || $node[\"GET Session Context\"].json.student_id || null,\n  campaign_id: $node[\"GET Session Context\"].json.campaign_id || null,\n  identity_confidence: \"HIGH\",\n  needs_review: true,\n  handoff_reason: $json.handoff_reason || \"handoff\",\n  detected_intent: $json.detected_intent || $json.intent || \"HUMANO\",\n  risk_level: $json.risk_level || \"LOW\",\n  received_at: $node[\"Webhook Chat\"].json.body?.received_at || $node[\"Webhook Chat\"].json.received_at\n}) }}",
-        "options": {
-          "continueOnFail": true,
-          "timeout": 10000
-        }
-      },
-      "id": "298eb7d3-eaa6-4831-8c4a-361f06168c38",
-      "name": "Backend: Registrar Handoff",
-      "type": "n8n-nodes-base.httpRequest",
-      "typeVersion": 4.4,
-      "position": [
-        -416,
-        4288
-      ]
-    },
-    {
-      "parameters": {
-        "numberInputs": 4
-      },
-      "id": "2ec0aff3-889b-408f-ba89-8cbaf9cd7869",
-      "name": "Merge Branches",
-      "type": "n8n-nodes-base.merge",
-      "typeVersion": 3,
-      "position": [
-        -192,
-        4544
-      ]
-    },
-    {
-      "parameters": {
-        "method": "POST",
-        "url": "http://host.docker.internal:8000/inbound/reply",
-        "sendBody": true,
-        "specifyBody": "json",
-        "jsonBody": "={{ JSON.stringify({\n  school_id: $node[\"Webhook Chat\"].json.body?.school_id || $node[\"Webhook Chat\"].json.school_id,\n  sender_jid: $node[\"Webhook Chat\"].json.body?.sender_jid || $node[\"Webhook Chat\"].json.sender_jid,\n  raw_message_id: ($node[\"Webhook Chat\"].json.body?.response_id || $node[\"Webhook Chat\"].json.response_id || $node[\"Webhook Chat\"].json.raw_message_id || $node[\"Webhook Chat\"].json.body?.raw_message_id || (\"n8n-\" + ($node[\"Webhook Chat\"].json.body?.sender_jid || $node[\"Webhook Chat\"].json.sender_jid || \"unknown\") + \"-\" + ($node[\"Webhook Chat\"].json.body?.received_at || $node[\"Webhook Chat\"].json.received_at || \"no-date\"))),\n  body: ($node[\"Webhook Chat\"].json.body?.message_text || $node[\"Webhook Chat\"].json.message_text || (($node[\"GET Session Context\"].json.messages || []).filter(m => m.text).slice(-1)[0]?.text) || \"[mensagem sem texto]\"),\n  student_id: $node[\"Webhook Chat\"].json.body?.student_id || $node[\"Webhook Chat\"].json.student_id || $node[\"GET Session Context\"].json.student_id || null,\n  campaign_id: $node[\"GET Session Context\"].json.campaign_id || null,\n  reason: $json.category === \"DOENCA\" ? \"ILLNESS\" : ($json.category === \"TRABALHO\" ? \"WORK\" : ($json.category === \"TRANSPORTE\" ? \"SCHOOL_ISSUE\" : ($json.category === \"FAMILIA\" ? \"FAMILY\" : \"OTHER\"))),\n  ai_confidence: $json.confidence,\n  identity_confidence: \"HIGH\",\n  needs_review: false,\n  detected_intent: $json.intent || \"JUSTIFICATIVA_FALTA\",\n  risk_level: $json.risk_level || \"LOW\",\n  received_at: $node[\"Webhook Chat\"].json.body?.received_at || $node[\"Webhook Chat\"].json.received_at\n}) }}",
-        "options": {
-          "continueOnFail": true,
-          "timeout": 10000
-        }
-      },
-      "id": "bbc7590f-c411-46fe-baad-5294a646a26b",
-      "name": "Backend: Registrar Falta",
-      "type": "n8n-nodes-base.httpRequest",
-      "typeVersion": 4.4,
-      "position": [
-        -864,
-        4480
-      ]
-    },
-    {
-      "parameters": {
-        "method": "POST",
-        "url": "https://api.openai.com/v1/chat/completions",
-        "sendHeaders": true,
-        "headerParameters": {
-          "parameters": [
-            {
-              "name": "Authorization",
-              "value": "=Bearer {{ $env.OPENAI_API_KEY }}"
-            },
-            {
-              "name": "Content-Type",
-              "value": "application/json"
-            }
-          ]
-        },
-        "sendBody": true,
-        "specifyBody": "json",
-        "jsonBody": "={{ JSON.stringify({\n  model: \"gpt-4o-mini\",\n  messages: [\n    {\n      role: \"system\",\n      content: \"Você é a IA 2 (Gerador de Resposta) da escola Décia. Seu objetivo é acolher o contato do responsável e tratar o registro da justificativa de falta de forma extremamente empática, humana e atenciosa.\\n\\nRegras importantes:\\n1. Retorne estritamente um JSON com a chave \\\"response_text\\\" contendo a resposta gerada.\\n2. Identifique se temos o nome do aluno identificado no contexto.\\n- Se o nome do aluno for nulo, \\\"aluno\\\" ou não identificado, responda de forma muito solícita e acolhedora dizendo que registrou o aviso da falta, mas que para podermos formalizar e justificar no sistema da escola, você precisa que ela informe o *nome completo do aluno* e a *turma* dele.\\n- Se o nome do aluno estiver identificado (ex: João da Silva), confirme o recebimento da justificativa de forma empática usando o nome dele (ex: deseje melhoras rápidas se for por motivo de saúde/doença, demonstre compreensão e apoio se for por motivo de trabalho ou questões familiares/luto).\\n3. Seja natural, acolhedor e carinhoso. Evite respostas secas ou robóticas. Dê uma palavra de conforto e acolhimento sincero sempre que for oportuno.\\n4. Nunca use termos como \\\"assistente virtual\\\", \\\"robô\\\" ou \\\"sistema\\\". Fale como uma pessoa atenciosa da equipe da Escola Décia.\"\n    },\n    {\n      role: \"user\",\n      content: \"Contexto:\\n- Nome Aluno: \" + ($node[\"GET Session Context\"].json.student_name || \"aluno\") + \"\\n- Categoria Falta: \" + ($node[\"Parse Classificador Segura\"].json.category || \"não informada\") + \"\\n\\nMensagem Responsável: \" + ($node[\"Webhook Chat\"].json.message_text || $node[\"Webhook Chat\"].json.body?.message_text || \"\") + \"\\n\\nEscreva a resposta final atenciosa.\"\n    }\n  ],\n  response_format: { type: \"json_object\" }\n}) }}",
-        "options": {
-          "continueOnFail": true,
-          "timeout": 10000
-        }
-      },
-      "id": "95c6e476-5d81-45ee-8731-4484bc71d9f3",
-      "name": "IA 2 — Resposta Justificativa",
-      "type": "n8n-nodes-base.httpRequest",
-      "typeVersion": 4.4,
-      "position": [
-        -640,
-        4480
-      ]
-    },
-    {
-      "parameters": {
-        "mode": "runOnceForEachItem",
-        "jsCode": "let response = {\n  response_text: \"Agradecemos sua mensagem. Nossa equipe registrou as informações e seguirá acompanhando o caso.\",\n  model: $json.model || \"gpt-4o-mini\",\n  prompt_version: \"v2\",\n  detected_intent: \"JUSTIFICATIVA_FALTA\",\n  risk_level: \"LOW\",\n  response_id: null,\n  student_id: null,\n  campaign_id: null\n};\ntry {\n  const saved = $(\"Backend: Registrar Falta\").item.json;\n  response.response_id = saved.response_id || null;\n  response.student_id = saved.student_id || null;\n  response.campaign_id = saved.campaign_id || null;\n} catch (e) {\n  // keep correlation fields null when the registration node did not return them\n}\ntry {\n  let content = $json.choices[0].message.content.trim();\n  let parsed = JSON.parse(content);\n  response.response_text = parsed.response_text || response.response_text;\n} catch (e) {\n  // fallback if JSON parsing fails\n}\nreturn response;"
-      },
-      "id": "534ff8c5-3736-4ccd-a686-9c6a00b34d0f",
-      "name": "Parse Resposta Justificativa",
-      "type": "n8n-nodes-base.code",
-      "typeVersion": 2,
-      "position": [
-        -416,
-        4480
-      ]
-    },
-    {
-      "parameters": {
-        "method": "POST",
-        "url": "https://api.openai.com/v1/chat/completions",
-        "sendHeaders": true,
-        "headerParameters": {
-          "parameters": [
-            {
-              "name": "Authorization",
-              "value": "=Bearer {{ $env.OPENAI_API_KEY }}"
-            },
-            {
-              "name": "Content-Type",
-              "value": "application/json"
-            }
-          ]
-        },
-        "sendBody": true,
-        "specifyBody": "json",
-        "jsonBody": "={{ JSON.stringify({\n  model: \"gpt-4o-mini\",\n  messages: [\n    {\n      role: \"system\",\n      content: \"Você é a IA 2 (Gerador de Resposta SAC) da escola Décia. Seu objetivo é responder dúvidas simples de secretaria, horários ou documentação de forma extremamente acolhedora, humana e atenciosa.\\n\\nRegras estritas:\\n1. Retorne estritamente um JSON com a chave \\\"response_text\\\" contendo a resposta gerada.\\n2. Seja prestativo, empático e atencioso. Se o usuário estiver perguntando algo que requer uma explicação mais completa, sinta-se à vontade para fornecer uma resposta detalhada e explicativa, mas mantenha a clareza. Evite respostas excessivamente curtas ou secas; converse de forma carinhosa.\\n3. Utilize as informações oficiais do Contexto Oficial RAG fornecido abaixo. Priorize sempre este contexto oficial. Se a resposta exata não constar no contexto, informe de forma gentil que não tem a resposta exata no momento, mas que a equipe humana vai analisar a dúvida em breve. Nunca invente horários, salas ou regras que não estejam no contexto.\\n4. Nunca tente responder a denúncias, agressões, assédio, ou temas delicados de saúde mental — informe com sensibilidade que a coordenação foi acionada e entrará em contato em breve.\"\n    },\n    {\n      role: \"user\",\n      content: \"Dúvida do Responsável: \" + ($node[\"Webhook Chat\"].json.message_text || $node[\"Webhook Chat\"].json.body?.message_text || \"\") + \"\\n\\nContexto Oficial RAG:\\n\" + JSON.stringify($node[\"Agrupar RAG\"].json.results || []) + \"\\n\\nEscreva a resposta final atenciosa.\"\n    }\n  ],\n  response_format: { type: \"json_object\" }\n}) }}",
-        "options": {
-          "continueOnFail": true,
-          "timeout": 10000
-        }
-      },
-      "id": "0f190a49-22cb-48ba-9ff0-d3cb5e2b497c",
-      "name": "IA 2 — Resposta SAC",
-      "type": "n8n-nodes-base.httpRequest",
-      "typeVersion": 4.4,
-      "position": [
-        -512,
-        4672
-      ]
-    },
-    {
-      "parameters": {
-        "mode": "runOnceForEachItem",
-        "jsCode": "let response = {\n  response_text: \"Agradecemos sua mensagem. Nossa equipe registrou as informações e seguirá acompanhando o caso.\",\n  model: $json.model || \"gpt-4o-mini\",\n  prompt_version: \"v2\",\n  detected_intent: \"DUVIDA_SECRETARIA\",\n  risk_level: \"LOW\"\n};\ntry {\n  let content = $json.choices[0].message.content.trim();\n  let parsed = JSON.parse(content);\n  response.response_text = parsed.response_text || response.response_text;\n} catch (e) {\n  // fallback\n}\nreturn response;"
-      },
-      "id": "0e947b67-1493-476b-96b9-7e55340a4638",
-      "name": "Parse Resposta SAC",
-      "type": "n8n-nodes-base.code",
-      "typeVersion": 2,
-      "position": [
-        -304,
-        4672
-      ]
-    },
-    {
-      "parameters": {
-        "mode": "runOnceForEachItem",
-        "jsCode": "let input = $json;\nreturn {\n  response_text: \"Agradecemos sua mensagem. Nossa equipe registrou as informações e seguirá acompanhando o caso.\",\n  model: \"static_fallback\",\n  prompt_version: \"v1\",\n  detected_intent: \"DESCONHECIDO\",\n  risk_level: \"LOW\",\n  handoff_reason: \"fallback\"\n};"
-      },
-      "id": "9631bb78-bab4-4bfb-82f1-bf04b9266ef1",
-      "name": "Configurar Fallback",
-      "type": "n8n-nodes-base.code",
-      "typeVersion": 2,
-      "position": [
-        -640,
-        4864
-      ]
-    },
-    {
-      "parameters": {
-        "method": "POST",
-        "url": "http://host.docker.internal:8000/inbound/reply",
-        "sendBody": true,
-        "specifyBody": "json",
-        "jsonBody": "={{ JSON.stringify({\n  school_id: $node[\"Webhook Chat\"].json.body?.school_id || $node[\"Webhook Chat\"].json.school_id,\n  sender_jid: $node[\"Webhook Chat\"].json.body?.sender_jid || $node[\"Webhook Chat\"].json.sender_jid,\n  raw_message_id: ($node[\"Webhook Chat\"].json.body?.response_id || $node[\"Webhook Chat\"].json.response_id || $node[\"Webhook Chat\"].json.raw_message_id || $node[\"Webhook Chat\"].json.body?.raw_message_id || (\"n8n-\" + ($node[\"Webhook Chat\"].json.body?.sender_jid || $node[\"Webhook Chat\"].json.sender_jid || \"unknown\") + \"-\" + ($node[\"Webhook Chat\"].json.body?.received_at || $node[\"Webhook Chat\"].json.received_at || \"no-date\"))),\n  body: ($node[\"Webhook Chat\"].json.body?.message_text || $node[\"Webhook Chat\"].json.message_text || (($node[\"GET Session Context\"].json.messages || []).filter(m => m.text).slice(-1)[0]?.text) || \"[mensagem sem texto]\"),\n  student_id: $node[\"Webhook Chat\"].json.body?.student_id || $node[\"Webhook Chat\"].json.student_id || $node[\"GET Session Context\"].json.student_id || null,\n  campaign_id: $node[\"GET Session Context\"].json.campaign_id || null,\n  identity_confidence: \"HIGH\",\n  needs_review: true,\n  handoff_reason: \"desconhecido\",\n  detected_intent: \"DESCONHECIDO\",\n  risk_level: \"LOW\",\n  received_at: $node[\"Webhook Chat\"].json.body?.received_at || $node[\"Webhook Chat\"].json.received_at\n}) }}",
-        "options": {
-          "continueOnFail": true,
-          "timeout": 10000
-        }
-      },
-      "id": "8508efb7-7376-4618-9d2e-90e7e4d7bd21",
-      "name": "Backend: Registrar Fallback",
-      "type": "n8n-nodes-base.httpRequest",
-      "typeVersion": 4.4,
-      "position": [
-        -416,
-        4864
-      ]
-    },
-    {
-      "parameters": {
-        "method": "POST",
-        "url": "http://host.docker.internal:8000/inbound/ai_interaction",
-        "sendBody": true,
-        "specifyBody": "json",
-        "jsonBody": "={{ JSON.stringify({\n  response_id: (() => { const rid = $json.response_id || null; return /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/.test(String(rid || \"\")) ? rid : null; })(),\n  student_id: (() => { const sid = $json.student_id || $node[\"GET Session Context\"].json.student_id || null; return /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/.test(String(sid || \"\")) ? sid : null; })(),\n  prompt_version: $json.prompt_version || \"\",\n  model: $json.model || \"\",\n  input_text: $node[\"Webhook Chat\"].json.body?.message_text || $node[\"Webhook Chat\"].json.message_text || \"\",\n  output_text: $json.response_text || \"\",\n  classified_reason: $json.detected_intent || \"\",\n  risk_level: $json.risk_level || \"\"\n}) }}",
-        "options": {
-          "continueOnFail": true,
-          "timeout": 10000
-        }
-      },
-      "id": "0bee23d8-1a09-4693-8c29-2dd756d7f11b",
-      "name": "POST AI Interaction",
-      "type": "n8n-nodes-base.httpRequest",
-      "typeVersion": 4.4,
-      "position": [
-        32,
-        4576
-      ]
-    },
-    {
-      "parameters": {
-        "method": "POST",
-        "url": "http://host.docker.internal:8080/message/sendText/escola-decia",
-        "sendHeaders": true,
-        "headerParameters": {
-          "parameters": [
-            {
-              "name": "apikey",
-              "value": "clinivet_global_key_2026"
-            },
-            {
-              "name": "Content-Type",
-              "value": "application/json"
-            }
-          ]
-        },
-        "sendBody": true,
-        "specifyBody": "json",
-        "jsonBody": "={{ JSON.stringify({\n  number: (($node[\"GET Session Context\"].json.reply_to_jid || $node[\"GET Session Context\"].json.wa_jid || $node[\"Webhook Chat\"].json.body?.sender_jid || $node[\"Webhook Chat\"].json.sender_jid || \"\").endsWith('@lid')) ?\n          ($node[\"GET Session Context\"].json.reply_to_jid || $node[\"GET Session Context\"].json.wa_jid || $node[\"Webhook Chat\"].json.body?.sender_jid || $node[\"Webhook Chat\"].json.sender_jid || \"\") :\n          ($node[\"GET Session Context\"].json.reply_to_jid || $node[\"GET Session Context\"].json.wa_jid || $node[\"Webhook Chat\"].json.body?.sender_jid || $node[\"Webhook Chat\"].json.sender_jid || \"\").split('@')[0],\n  text: $node[\"Consolidar Contexto\"].json.response_text\n}) }}",
-        "options": {}
-      },
-      "id": "0dbfc64b-e425-421d-8532-d4f0f38a2ee1",
-      "name": "Evolution API Send",
-      "type": "n8n-nodes-base.httpRequest",
-      "typeVersion": 4.4,
-      "position": [
-        256,
-        4576
-      ]
-    },
-    {
-      "parameters": {
-        "options": {}
-      },
-      "id": "1b2929b9-cd9c-4c12-af72-96093924f7ed",
-      "name": "Set Response Final",
-      "type": "n8n-nodes-base.set",
-      "typeVersion": 3.4,
-      "position": [
-        480,
-        4576
-      ]
-    },
-    {
-      "parameters": {
-        "options": {}
-      },
-      "id": "6d4522f6-7c75-4952-ad1d-60c6dfb546af",
-      "name": "Respond to Webhook",
-      "type": "n8n-nodes-base.respondToWebhook",
-      "typeVersion": 1.5,
-      "position": [
-        704,
-        4576
-      ]
-    },
-    {
-      "parameters": {
-        "mode": "runOnceForEachItem",
-        "jsCode": "let response_text = \"Agradecemos sua mensagem. Nossa equipe registrou as informações e seguirá acompanhando o caso.\";\nlet prompt_version = \"\";\nlet model = \"\";\nlet detected_intent = \"\";\nlet risk_level = \"\";\n\nif ($(\"Parse Resposta Justificativa\").isExecuted) {\n  const data = $(\"Parse Resposta Justificativa\").item.json;\n  response_text = data.response_text || response_text;\n  prompt_version = data.prompt_version || \"\";\n  model = data.model || \"\";\n  detected_intent = data.detected_intent || \"\";\n  risk_level = data.risk_level || \"\";\n} else if ($(\"Parse Resposta SAC\").isExecuted) {\n  const data = $(\"Parse Resposta SAC\").item.json;\n  response_text = data.response_text || response_text;\n  prompt_version = data.prompt_version || \"\";\n  model = data.model || \"\";\n  detected_intent = data.detected_intent || \"\";\n  risk_level = data.risk_level || \"\";\n} else if ($(\"Configurar Handoff\").isExecuted) {\n  const data = $(\"Configurar Handoff\").item.json;\n  response_text = data.response_text || response_text;\n  prompt_version = data.prompt_version || \"\";\n  model = data.model || \"\";\n  detected_intent = data.detected_intent || \"\";\n  risk_level = data.risk_level || \"\";\n} else if ($(\"Configurar Fallback\").isExecuted) {\n  const data = $(\"Configurar Fallback\").item.json;\n  response_text = data.response_text || response_text;\n  prompt_version = data.prompt_version || \"\";\n  model = data.model || \"\";\n  detected_intent = data.detected_intent || \"\";\n  risk_level = data.risk_level || \"\";\n}\n\nreturn {\n  ...$json,\n  response_text,\n  prompt_version,\n  model,\n  detected_intent,\n  risk_level\n};"
-      },
-      "id": "d2818b32-2e63-4fe3-a9ea-c3f8ceafed1c",
-      "name": "Consolidar Contexto",
-      "type": "n8n-nodes-base.code",
-      "typeVersion": 2,
-      "position": [
-        -80,
-        4576
-      ]
-    },
-    {
-      "parameters": {
-        "url": "={{ $node[\"Webhook Chat\"].json.body?.school_id ? ('http://host.docker.internal:8000/api/v1/schools/' + $node[\"Webhook Chat\"].json.body.school_id + '/knowledge') : 'http://host.docker.internal:8000/api/v1/schools/aac99735-32cb-4615-b2cb-0be315f18374/knowledge' }}",
-        "sendQuery": true,
-        "queryParameters": {
-          "parameters": [
-            {
-              "name": "query",
-              "value": "={{ $node[\"Webhook Chat\"].json.body?.message_text || $node[\"Webhook Chat\"].json.message_text || '' }}"
-            },
-            {
-              "name": "limit",
-              "value": "3"
-            }
-          ]
-        },
-        "options": {
-          "continueOnFail": true,
-          "timeout": 10000
-        }
-      },
-      "id": "4fd44512-e61c-4149-8f3c-e0d203b74f26",
-      "name": "GET School Knowledge",
-      "type": "n8n-nodes-base.httpRequest",
-      "typeVersion": 4.4,
-      "position": [
-        -864,
-        4672
-      ]
-    },
-    {
-      "parameters": {
-        "jsCode": "return [{\n  json: {\n    results: $input.all().map(item => item.json)\n  }\n}];"
-      },
-      "id": "4422d004-7494-4bb1-94a0-5cfcc008706e",
-      "name": "Agrupar RAG",
-      "type": "n8n-nodes-base.code",
-      "typeVersion": 2,
-      "position": [
-        -704,
-        4736
-      ]
-    }
-  ],
-  "pinData": {},
+  "id": "Yf3OwySpuR8OMDV4",
+  "name": "Busca Ativa - Chat Conversacional (RAG TESTE)novo",
+  "active": true,
+  "isArchived": false,
+  "versionId": "3d05b6d4-9102-497f-b154-37fb7a4d955d",
+  "activeVersionId": "3d05b6d4-9102-497f-b154-37fb7a4d955d",
+  "triggerCount": 1,
+  "createdAt": "2026-06-12T13:23:54.567Z",
+  "updatedAt": "2026-06-16T10:38:49.725Z",
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate",
+    "availableInMCP": true,
+    "timeSavedMode": "fixed",
+    "callerPolicy": "workflowsFromSameOwner"
+  },
   "connections": {
     "Webhook Chat": {
       "main": [
@@ -515,6 +79,13 @@
         [
           {
             "node": "GET School Knowledge",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Configurar Cortesia",
             "type": "main",
             "index": 0
           }
@@ -594,6 +165,28 @@
         ]
       ]
     },
+    "GET School Knowledge": {
+      "main": [
+        [
+          {
+            "node": "Agrupar RAG",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Agrupar RAG": {
+      "main": [
+        [
+          {
+            "node": "IA 2 — Resposta SAC",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
     "IA 2 — Resposta SAC": {
       "main": [
         [
@@ -616,6 +209,28 @@
         ]
       ]
     },
+    "Configurar Cortesia": {
+      "main": [
+        [
+          {
+            "node": "Backend: Registrar Cortesia",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Backend: Registrar Cortesia": {
+      "main": [
+        [
+          {
+            "node": "Merge Branches",
+            "type": "main",
+            "index": 3
+          }
+        ]
+      ]
+    },
     "Configurar Fallback": {
       "main": [
         [
@@ -633,7 +248,18 @@
           {
             "node": "Merge Branches",
             "type": "main",
-            "index": 3
+            "index": 4
+          }
+        ]
+      ]
+    },
+    "Consolidar Contexto": {
+      "main": [
+        [
+          {
+            "node": "POST AI Interaction",
+            "type": "main",
+            "index": 0
           }
         ]
       ]
@@ -670,53 +296,1278 @@
           }
         ]
       ]
-    },
-    "Consolidar Contexto": {
-      "main": [
-        [
-          {
-            "node": "POST AI Interaction",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "GET School Knowledge": {
-      "main": [
-        [
-          {
-            "node": "Agrupar RAG",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Agrupar RAG": {
-      "main": [
-        [
-          {
-            "node": "IA 2 — Resposta SAC",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
     }
   },
-  "active": true,
-  "settings": {
-    "executionOrder": "v1",
-    "binaryMode": "separate",
-    "timeSavedMode": "fixed",
-    "callerPolicy": "workflowsFromSameOwner",
-    "availableInMCP": false
+  "nodes": [
+    {
+      "id": "43bedc69-e30c-44c3-8036-4d80c508359b",
+      "name": "Webhook Chat",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [
+        0,
+        384
+      ],
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "chat-interaction",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "webhookId": "9ac63f44-7dcb-443e-bb52-84fb552a5a57"
+    },
+    {
+      "id": "1296d4f1-948a-4ad0-979c-fe5cd74ca188",
+      "name": "GET Session Context",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        224,
+        384
+      ],
+      "parameters": {
+        "url": "http://host.docker.internal:8000/students/session_context",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "sender_jid",
+              "value": "={{ $json.body?.sender_jid || $json.sender_jid }}"
+            },
+            {
+              "name": "school_id",
+              "value": "={{ $json.body?.school_id || $json.school_id }}"
+            },
+            {
+              "name": "student_id",
+              "value": "={{ $json.body?.student_id || $json.student_id || \"\" }}"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 30000
+        }
+      }
+    },
+    {
+      "id": "01cf7c99-e9c1-483b-bb8f-3d7fa815407e",
+      "name": "IA 1 - Classificador",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        448,
+        384
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.openai.com/v1/chat/completions",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{ $env.OPENAI_API_KEY }}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({\n  model: \"gpt-4o-mini\",\n  messages: [\n    {\n      role: \"system\",\n      content: \"Você é a IA 1 (Classificador) da escola Décia. Seu único objetivo é classificar a intenção e o risco das mensagens recebidas e retornar estritamente um JSON.\\n\\nCampos no JSON:\\n- intent: 'JUSTIFICATIVA_FALTA' (se o responsável justifica faltas ou atrasos), 'DUVIDA_SECRETARIA' (dúvidas sobre horários, secretaria, documentos, matrículas), 'SAUDACAO' (cumprimentos como olá, bom dia, tudo bem), 'AGRADECIMENTO_DESPEDIDA' (agradecimentos como obrigado, valeu, ou despedidas como tchau, até mais), 'HUMANO' (solicitação explícita de falar com humano), ou 'DESCONHECIDO' (outros assuntos).\\n- category: 'DOENCA', 'TRABALHO', 'TRANSPORTE', 'FAMILIA', 'OUTRO' (se intent for JUSTIFICATIVA_FALTA), ou null caso contrário.\\n- risk_level: 'LOW' (baixo risco), 'MEDIUM' (desânimo, recorrência moderada), 'HIGH' (bullying, conflitos graves, problemas jurídicos, ameaças, agressividade, saúde mental grave).\\n- needs_human: true (se risk_level for HIGH, se houver agressividade/bullying, solicitação explícita ou tom conflituoso), ou false caso contrário.\\n- confidence: float entre 0.0 e 1.0 (grau de certeza na classificação).\\n\\nRegra de Ouro: Retorne APENAS o JSON. Não adicione texto explicativo ou markdown.\"\n    },\n    {\n      role: \"user\",\n      content: \"Contexto:\\n- Aluno: \" + ($node[\"GET Session Context\"].json.student_name || \"não identificado\") + \"\\n- Último Motivo: \" + ($node[\"GET Session Context\"].json.last_reason || \"não informado\") + \"\\n- Campanha: \" + ($node[\"GET Session Context\"].json.campaign_name || \"não informado\") + \"\\n- Dias Falta: \" + ($node[\"GET Session Context\"].json.campaign_absence_days || \"não informado\") + \"\\n\\nHistórico Recente:\\n\" + JSON.stringify($node[\"GET Session Context\"].json.messages || [], null, 2) + \"\\n\\nMensagem Atual: \" + ($node[\"Webhook Chat\"].json.message_text || $node[\"Webhook Chat\"].json.body?.message_text || \"\") + \"\\n\\nRetorne agora a classificação JSON estrita.\"\n    }\n  ],\n  response_format: { type: \"json_object\" }\n}) }}"
+      }
+    },
+    {
+      "id": "295329f6-4c68-4e3c-91c8-876d8f544502",
+      "name": "Parse Classificador Segura",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        672,
+        384
+      ],
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "let response = {\n  intent: \"DESCONHECIDO\",\n  category: null,\n  risk_level: \"LOW\",\n  needs_human: true,\n  confidence: 0.0,\n  needs_review: true,\n  handoff_reason: \"erro_classificacao\"\n};\n\ntry {\n  let content = $json.choices[0].message.content.trim();\n  if (content.startsWith(\"```json\")) {\n    content = content.substring(7);\n  }\n  if (content.endsWith(\"```\")) {\n    content = content.substring(0, content.length - 3);\n  }\n  let parsed = JSON.parse(content.trim());\n  \n  response.intent = parsed.intent || \"DESCONHECIDO\";\n  response.category = parsed.category || null;\n  response.risk_level = parsed.risk_level || \"LOW\";\n  response.needs_human = parsed.needs_human === true || parsed.needs_human === \"true\";\n  response.confidence = parseFloat(parsed.confidence) || 0.0;\n  response.needs_review = response.needs_human;\n  \n  // Se a confiança for menor que 0.75, força handoff humano\n  if (response.confidence < 0.75) {\n    response.needs_human = true;\n    response.needs_review = true;\n    response.handoff_reason = \"baixa_confianca\";\n  } else if (response.needs_human) {\n    response.handoff_reason = parsed.category || \"detectado_ia\";\n  }\n} catch (e) {\n  response.needs_human = true;\n  response.needs_review = true;\n  response.handoff_reason = \"erro_json_parse\";\n}\n\nreturn response;"
+      }
+    },
+    {
+      "id": "07cf3f61-84fb-4159-8ad8-9c0b7430f5b3",
+      "name": "Roteador por Intenção",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3,
+      "position": [
+        896,
+        336
+      ],
+      "parameters": {
+        "mode": "expression",
+        "numberOutputs": 5,
+        "output": "={{ $json.needs_human === true || $json.risk_level === \"HIGH\" || $json.intent === \"HUMANO\" ? 0 : ($json.intent === \"JUSTIFICATIVA_FALTA\" ? 1 : ($json.intent === \"DUVIDA_SECRETARIA\" ? 2 : ($json.intent === \"SAUDACAO\" || $json.intent === \"AGRADECIMENTO_DESPEDIDA\" ? 3 : 4))) }}"
+      }
+    },
+    {
+      "id": "6ec8b718-1e63-479e-a2f2-e7facaef69d9",
+      "name": "Configurar Handoff",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1568,
+        0
+      ],
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "let input = $json;\nreturn {\n  response_text: \"Agradecemos sua mensagem. Nossa equipe registrou as informações e seguirá acompanhando o caso.\",\n  model: \"static_handoff\",\n  prompt_version: \"v1\",\n  detected_intent: input.intent || \"HUMANO\",\n  risk_level: input.risk_level || \"LOW\",\n  handoff_reason: input.handoff_reason || \"detectado_ia\"\n};"
+      }
+    },
+    {
+      "id": "73a3eba8-9e3c-4275-bb6b-71ff4ea141ee",
+      "name": "Backend: Registrar Handoff",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        1792,
+        0
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "http://host.docker.internal:8000/inbound/reply",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({\n  school_id: $node[\"Webhook Chat\"].json.body?.school_id || $node[\"Webhook Chat\"].json.school_id,\n  sender_jid: $node[\"Webhook Chat\"].json.body?.sender_jid || $node[\"Webhook Chat\"].json.sender_jid,\n  raw_message_id: ($node[\"Webhook Chat\"].json.body?.response_id || $node[\"Webhook Chat\"].json.response_id || $node[\"Webhook Chat\"].json.raw_message_id || $node[\"Webhook Chat\"].json.body?.raw_message_id || (\"n8n-\" + ($node[\"Webhook Chat\"].json.body?.sender_jid || $node[\"Webhook Chat\"].json.sender_jid || \"unknown\") + \"-\" + ($node[\"Webhook Chat\"].json.body?.received_at || $node[\"Webhook Chat\"].json.received_at || \"no-date\"))),\n  body: ($node[\"Webhook Chat\"].json.body?.message_text || $node[\"Webhook Chat\"].json.message_text || (($node[\"GET Session Context\"].json.messages || []).filter(m => m.text).slice(-1)[0]?.text) || \"[mensagem sem texto]\"),\n  student_id: $node[\"Webhook Chat\"].json.body?.student_id || $node[\"Webhook Chat\"].json.student_id || $node[\"GET Session Context\"].json.student_id || null,\n  campaign_id: $node[\"GET Session Context\"].json.campaign_id || null,\n  identity_confidence: \"HIGH\",\n  needs_review: true,\n  handoff_reason: $json.handoff_reason || \"handoff\",\n  detected_intent: $json.detected_intent || $json.intent || \"HUMANO\",\n  risk_level: $json.risk_level || \"LOW\",\n  received_at: $node[\"Webhook Chat\"].json.body?.received_at || $node[\"Webhook Chat\"].json.received_at\n}) }}",
+        "options": {
+          "timeout": 30000
+        }
+      }
+    },
+    {
+      "id": "d5cf736a-2bb3-4547-8753-4dd7ede0c0e0",
+      "name": "Merge Branches",
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3,
+      "position": [
+        2016,
+        336
+      ],
+      "parameters": {
+        "mode": "append",
+        "numberInputs": 5
+      }
+    },
+    {
+      "id": "0284080e-6037-47cb-bff1-783259109f81",
+      "name": "Backend: Registrar Falta",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        1344,
+        192
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "http://host.docker.internal:8000/inbound/reply",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({\n  school_id: $node[\"Webhook Chat\"].json.body?.school_id || $node[\"Webhook Chat\"].json.school_id,\n  sender_jid: $node[\"Webhook Chat\"].json.body?.sender_jid || $node[\"Webhook Chat\"].json.sender_jid,\n  raw_message_id: ($node[\"Webhook Chat\"].json.body?.response_id || $node[\"Webhook Chat\"].json.response_id || $node[\"Webhook Chat\"].json.raw_message_id || $node[\"Webhook Chat\"].json.body?.raw_message_id || (\"n8n-\" + ($node[\"Webhook Chat\"].json.body?.sender_jid || $node[\"Webhook Chat\"].json.sender_jid || \"unknown\") + \"-\" + ($node[\"Webhook Chat\"].json.body?.received_at || $node[\"Webhook Chat\"].json.received_at || \"no-date\"))),\n  body: ($node[\"Webhook Chat\"].json.body?.message_text || $node[\"Webhook Chat\"].json.message_text || (($node[\"GET Session Context\"].json.messages || []).filter(m => m.text).slice(-1)[0]?.text) || \"[mensagem sem texto]\"),\n  student_id: $node[\"Webhook Chat\"].json.body?.student_id || $node[\"Webhook Chat\"].json.student_id || $node[\"GET Session Context\"].json.student_id || null,\n  campaign_id: $node[\"GET Session Context\"].json.campaign_id || null,\n  reason: $json.category === \"DOENCA\" ? \"ILLNESS\" : ($json.category === \"TRABALHO\" ? \"WORK\" : ($json.category === \"TRANSPORTE\" ? \"SCHOOL_ISSUE\" : ($json.category === \"FAMILIA\" ? \"FAMILY\" : \"OTHER\"))),\n  ai_confidence: $json.confidence,\n  identity_confidence: \"HIGH\",\n  needs_review: false,\n  detected_intent: $json.intent || \"JUSTIFICATIVA_FALTA\",\n  risk_level: $json.risk_level || \"LOW\",\n  received_at: $node[\"Webhook Chat\"].json.body?.received_at || $node[\"Webhook Chat\"].json.received_at\n}) }}",
+        "options": {
+          "timeout": 30000
+        }
+      }
+    },
+    {
+      "id": "b3728d06-b0c3-404b-8abe-52a1951294eb",
+      "name": "IA 2 — Resposta Justificativa",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        1568,
+        192
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.openai.com/v1/chat/completions",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{ $env.OPENAI_API_KEY }}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({\n  model: \"gpt-4o-mini\",\n  messages: [\n    {\n      role: \"system\",\n      content: \"Você é a IA 2 (Gerador de Resposta) da escola Décia. Seu objetivo é acolher o contato do responsável e tratar o registro da justificativa de falta de forma extremamente empática, humana e atenciosa.\\n\\nRegras importantes:\\n1. Retorne estritamente um JSON com a chave \\\"response_text\\\" contendo a resposta gerada.\\n2. Identifique se o nome do aluno está no contexto.\\n- Se o nome do aluno for nulo, \\\"aluno\\\" ou não identificado, responda de forma muito solícita e acolhedora dizendo que registrou o aviso da falta, mas que para podermos formalizar e justificar no sistema da escola, você precisa que ela informe o *nome completo do aluno* e a *turma* dele.\\n- Se o nome do aluno estiver identificado (ex: João da Silva), confirme o recebimento da justificativa de forma empática usando o nome dele (ex: deseje melhoras rápidas se for por motivo de saúde/doença, demonstre compreensão e apoio se for por motivo de trabalho ou questões familiares/luto).\\n3. REGRA DE CONVERSAÇÃO CONTINUADA: Se você analisar o Histórico Recente da Conversa e verificar que a falta deste aluno JÁ foi registrada ou confirmada na interação anterior (ou seja, se a mensagem anterior do bot já confirmou o registro), NÃO repita a confirmação formal. Em vez disso, seja muito breve (1 ou 2 frases curtas) apenas agradecendo pelos novos detalhes ou desejando melhoras/apoio direto. Exemplo: 'Agradeço por detalhar, já atualizei aqui. Estimamos uma rápida melhora para ele!'\\n4. Seja natural, acolhedor e carinhoso. Evite respostas secas ou robóticas.\\n5. Nunca use termos como \\\"assistente virtual\\\", \\\"robô\\\" ou \\\"sistema\\\". Fale como uma pessoa atenciosa da equipe da Escola Décia.\"\n    },\n    {\n      role: \"user\",\n      content: \"Contexto:\\n- Nome Aluno: \" + ($node[\"GET Session Context\"].json.student_name || \"aluno\") + \"\\n- Categoria Falta: \" + ($node[\"Parse Classificador Segura\"].json.category || \"não informada\") + \"\\n- Último Motivo Registrado: \" + ($node[\"GET Session Context\"].json.last_reason || \"não informado\") + \"\\n\\nHistórico Recente da Conversa:\\n\" + JSON.stringify($node[\"GET Session Context\"].json.messages || [], null, 2) + \"\\n\\nMensagem Atual do Responsável: \" + ($node[\"Webhook Chat\"].json.message_text || $node[\"Webhook Chat\"].json.body?.message_text || \"\") + \"\\n\\nEscreva a resposta final atenciosa.\"\n    }\n  ],\n  response_format: { type: \"json_object\" }\n}) }}",
+        "options": {
+          "timeout": 30000
+        }
+      }
+    },
+    {
+      "id": "98c1695a-7685-4baa-b407-ab52e02da8cf",
+      "name": "Parse Resposta Justificativa",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1792,
+        192
+      ],
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "let response = {\n  response_text: \"Agradecemos sua mensagem. Nossa equipe registrou as informações e seguirá acompanhando o caso.\",\n  model: $json.model || \"gpt-4o-mini\",\n  prompt_version: \"v2\",\n  detected_intent: \"JUSTIFICATIVA_FALTA\",\n  risk_level: \"LOW\",\n  response_id: null,\n  student_id: null,\n  campaign_id: null\n};\ntry {\n  const saved = $(\"Backend: Registrar Falta\").first().json;\n  response.response_id = saved.response_id || null;\n  response.student_id = saved.student_id || null;\n  response.campaign_id = saved.campaign_id || null;\n} catch (e) {\n  // keep correlation fields null when the registration node did not return them\n}\ntry {\n  let content = $json.choices[0].message.content.trim();\n  let parsed = JSON.parse(content);\n  response.response_text = parsed.response_text || response.response_text;\n} catch (e) {\n  // fallback if JSON parsing fails\n}\nreturn response;"
+      }
+    },
+    {
+      "id": "40fc04ab-fb1c-4e17-8b38-0d2d9f147482",
+      "name": "GET School Knowledge",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        1120,
+        384
+      ],
+      "parameters": {
+        "url": "={{ $node[\"Webhook Chat\"].json.body?.school_id ? ('http://host.docker.internal:8000/api/v1/schools/' + $node[\"Webhook Chat\"].json.body.school_id + '/knowledge') : 'http://host.docker.internal:8000/api/v1/schools/aac99735-32cb-4615-b2cb-0be315f18374/knowledge' }}",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "query",
+              "value": "={{ $node[\"Webhook Chat\"].json.body?.message_text || $node[\"Webhook Chat\"].json.message_text || '' }}"
+            },
+            {
+              "name": "limit",
+              "value": "3"
+            }
+          ]
+        },
+        "options": {
+          "continueOnFail": true,
+          "timeout": 10000
+        }
+      },
+      "settings": {
+        "onError": "continue"
+      }
+    },
+    {
+      "id": "eafcb84d-ef07-430a-ad4f-771a05fd8479",
+      "name": "Agrupar RAG",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1344,
+        384
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "return [{\n  json: {\n    results: $input.all().map(item => item.json)\n  }\n}];"
+      }
+    },
+    {
+      "id": "ab55972b-ea71-48f7-9cd9-018dc2a5643e",
+      "name": "IA 2 — Resposta SAC",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        1568,
+        384
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.openai.com/v1/chat/completions",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{ $env.OPENAI_API_KEY }}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({\n  model: \"gpt-4o-mini\",\n  messages: [\n    {\n      role: \"system\",\n      content: \"Você é a IA 2 (Gerador de Resposta SAC) da escola Décia. Seu objetivo é responder dúvidas simples de secretaria, horários ou documentação de forma extremamente acolhedora, humana e atenciosa.\\n\\nRegras estritas:\\n1. Retorne estritamente um JSON com a chave \\\"response_text\\\" contendo a resposta gerada.\\n2. Seja prestativo, empático e atencioso. Se o usuário estiver perguntando algo que requer uma explicação mais completa, sinta-se à vontade para fornecer uma resposta detalhada e explicativa, mas mantenha a clareza. Evite respostas excessivamente curtas ou secas; converse de forma carinhosa.\\n3. Utilize as informações oficiais do Contexto Oficial RAG fornecido abaixo. Priorize sempre este contexto oficial. Se a resposta exata não constar no contexto, infoe de forma gentil que não tem a resposta exata no momento, mas que a equipe humana vai analisar a dúvida em breve. Nunca invente horários, salas ou regras que não estejam no contexto.\\n4. Nunca tente responder a denúncias, agressões, assédio, ou temas delicados de saúde mental — infoe com sensibilidade que a coordenação foi acionada e entrará em contato em breve.\"\n    },\n    {\n      role: \"user\",\n      content: \"Dúvida do Responsável: \" + ($node[\"Webhook Chat\"].json.message_text || $node[\"Webhook Chat\"].json.body?.message_text || \"\") + \"\\n\\nContexto Oficial RAG:\\n\" + JSON.stringify($node[\"Agrupar RAG\"].json.results || []) + \"\\n\\nEscreva a resposta final atenciosa.\"\n    }\n  ],\n  response_format: { type: \"json_object\" }\n}) }}"
+      }
+    },
+    {
+      "id": "4c037eb5-00d0-4098-b40d-e98c565d7642",
+      "name": "Parse Resposta SAC",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1792,
+        384
+      ],
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "let response = {\n  response_text: \"Agradecemos sua mensagem. Nossa equipe registrou as informações e seguirá acompanhando o caso.\",\n  model: $json.model || \"gpt-4o-mini\",\n  prompt_version: \"v2\",\n  detected_intent: \"DUVIDA_SECRETARIA\",\n  risk_level: \"LOW\"\n};\ntry {\n  let content = $json.choices[0].message.content.trim();\n  let parsed = JSON.parse(content);\n  response.response_text = parsed.response_text || response.response_text;\n} catch (e) {\n  // fallback\n}\nreturn response;"
+      }
+    },
+    {
+      "id": "b982d3aa-b59d-446d-90ba-8ebf6e046686",
+      "name": "Configurar Cortesia",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1568,
+        576
+      ],
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "let input = $json;\nlet intent = input.intent || \"SAUDACAO\";\nlet push_name = $(\"Webhook Chat\").first().json.body?.push_name || $(\"Webhook Chat\").first().json.push_name || \"\";\nlet first_name = push_name ? push_name.split(' ')[0] : \"\";\nlet text = \"\";\n\nif (intent === \"SAUDACAO\") {\n  text = first_name ? `Olá, ${first_name}! Tudo bem? Como posso te ajudar hoje?` : \"Olá! Tudo bem? Como podemos ajudar hoje?\";\n} else {\n  text = first_name ? `Por nada, ${first_name}! Se precisar de mais alguma coisa, estamos à disposição.` : \"Por nada! Se precisar de mais alguma coisa, a escola está à disposição.\";\n}\n\nreturn {\n  response_text: text,\n  model: \"static_cortesia\",\n  prompt_version: \"v1\",\n  detected_intent: intent,\n  risk_level: \"LOW\"\n};"
+      }
+    },
+    {
+      "id": "41de200b-542a-462f-9733-b734c999d6ff",
+      "name": "Backend: Registrar Cortesia",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        1792,
+        576
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "http://host.docker.internal:8000/inbound/reply",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({\n  school_id: $node[\"Webhook Chat\"].json.body?.school_id || $node[\"Webhook Chat\"].json.school_id,\n  sender_jid: $node[\"Webhook Chat\"].json.body?.sender_jid || $node[\"Webhook Chat\"].json.sender_jid,\n  raw_message_id: ($node[\"Webhook Chat\"].json.body?.response_id || $node[\"Webhook Chat\"].json.response_id || $node[\"Webhook Chat\"].json.raw_message_id || $node[\"Webhook Chat\"].json.body?.raw_message_id || (\"n8n-\" + ($node[\"Webhook Chat\"].json.body?.sender_jid || $node[\"Webhook Chat\"].json.sender_jid || \"unknown\") + \"-\" + ($node[\"Webhook Chat\"].json.body?.received_at || $node[\"Webhook Chat\"].json.received_at || \"no-date\"))),\n  body: ($node[\"Webhook Chat\"].json.body?.message_text || $node[\"Webhook Chat\"].json.message_text || (($node[\"GET Session Context\"].json.messages || []).filter(m => m.text).slice(-1)[0]?.text) || \"[mensagem sem texto]\"),\n  student_id: $node[\"Webhook Chat\"].json.body?.student_id || $node[\"Webhook Chat\"].json.student_id || $node[\"GET Session Context\"].json.student_id || null,\n  campaign_id: $node[\"GET Session Context\"].json.campaign_id || null,\n  identity_confidence: \"HIGH\",\n  needs_review: false,\n  handoff_reason: \"cortesia\",\n  detected_intent: $node[\"Parse Classificador Segura\"].json.intent || \"SAUDACAO\",\n  risk_level: \"LOW\",\n  received_at: $node[\"Webhook Chat\"].json.body?.received_at || $node[\"Webhook Chat\"].json.received_at\n}) }}",
+        "options": {
+          "continueOnFail": true,
+          "timeout": 30000
+        }
+      },
+      "settings": {
+        "onError": "continue"
+      }
+    },
+    {
+      "id": "8af013b4-6cb4-4941-be38-9d93996677aa",
+      "name": "Configurar Fallback",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1568,
+        768
+      ],
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "let input = $json;\nreturn {\n  response_text: \"Agradecemos sua mensagem. Nossa equipe registrou as informações e seguirá acompanhando o caso.\",\n  model: \"static_fallback\",\n  prompt_version: \"v1\",\n  detected_intent: \"DESCONHECIDO\",\n  risk_level: \"LOW\",\n  handoff_reason: \"fallback\"\n};"
+      }
+    },
+    {
+      "id": "f5a9075a-813e-477a-b594-59bdcb77ab11",
+      "name": "Backend: Registrar Fallback",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        1792,
+        768
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "http://host.docker.internal:8000/inbound/reply",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({\n  school_id: $node[\"Webhook Chat\"].json.body?.school_id || $node[\"Webhook Chat\"].json.school_id,\n  sender_jid: $node[\"Webhook Chat\"].json.body?.sender_jid || $node[\"Webhook Chat\"].json.sender_jid,\n  raw_message_id: ($node[\"Webhook Chat\"].json.body?.response_id || $node[\"Webhook Chat\"].json.response_id || $node[\"Webhook Chat\"].json.raw_message_id || $node[\"Webhook Chat\"].json.body?.raw_message_id || (\"n8n-\" + ($node[\"Webhook Chat\"].json.body?.sender_jid || $node[\"Webhook Chat\"].json.sender_jid || \"unknown\") + \"-\" + ($node[\"Webhook Chat\"].json.body?.received_at || $node[\"Webhook Chat\"].json.received_at || \"no-date\"))),\n  body: ($node[\"Webhook Chat\"].json.body?.message_text || $node[\"Webhook Chat\"].json.message_text || (($node[\"GET Session Context\"].json.messages || []).filter(m => m.text).slice(-1)[0]?.text) || \"[mensagem sem texto]\"),\n  student_id: $node[\"Webhook Chat\"].json.body?.student_id || $node[\"Webhook Chat\"].json.student_id || $node[\"GET Session Context\"].json.student_id || null,\n  campaign_id: $node[\"GET Session Context\"].json.campaign_id || null,\n  identity_confidence: \"HIGH\",\n  needs_review: true,\n  handoff_reason: \"desconhecido\",\n  detected_intent: \"DESCONHECIDO\",\n  risk_level: \"LOW\",\n  received_at: $node[\"Webhook Chat\"].json.body?.received_at || $node[\"Webhook Chat\"].json.received_at\n}) }}",
+        "options": {
+          "timeout": 30000
+        }
+      }
+    },
+    {
+      "id": "8c8ce7f7-0f95-482b-b384-4ba0ebdc2614",
+      "name": "Consolidar Contexto",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2240,
+        384
+      ],
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "let response_text = \"Agradecemos sua mensagem. Nossa equipe registrou as informações e seguirá acompanhando o caso.\";\nlet prompt_version = \"\";\nlet model = \"\";\nlet detected_intent = \"\";\nlet risk_level = \"\";\n\nif ($(\"Parse Resposta Justificativa\").isExecuted) {\n  const data = $(\"Parse Resposta Justificativa\").first().json;\n  response_text = data.response_text || response_text;\n  prompt_version = data.prompt_version || \"\";\n  model = data.model || \"\";\n  detected_intent = data.detected_intent || \"\";\n  risk_level = data.risk_level || \"\";\n} else if ($(\"Parse Resposta SAC\").isExecuted) {\n  const data = $(\"Parse Resposta SAC\").first().json;\n  response_text = data.response_text || response_text;\n  prompt_version = data.prompt_version || \"\";\n  model = data.model || \"\";\n  detected_intent = data.detected_intent || \"\";\n  risk_level = data.risk_level || \"\";\n} else if ($(\"Configurar Handoff\").isExecuted) {\n  const data = $(\"Configurar Handoff\").first().json;\n  response_text = data.response_text || response_text;\n  prompt_version = data.prompt_version || \"\";\n  model = data.model || \"\";\n  detected_intent = data.detected_intent || \"\";\n  risk_level = data.risk_level || \"\";\n} else if ($(\"Configurar Cortesia\").isExecuted) {\n  const data = $(\"Configurar Cortesia\").first().json;\n  response_text = data.response_text || response_text;\n  prompt_version = data.prompt_version || \"\";\n  model = data.model || \"\";\n  detected_intent = data.detected_intent || \"\";\n  risk_level = data.risk_level || \"\";\n} else if ($(\"Configurar Fallback\").isExecuted) {\n  const data = $(\"Configurar Fallback\").first().json;\n  response_text = data.response_text || response_text;\n  prompt_version = data.prompt_version || \"\";\n  model = data.model || \"\";\n  detected_intent = data.detected_intent || \"\";\n  risk_level = data.risk_level || \"\";\n}\n\nreturn {\n  ...$json,\n  response_text,\n  prompt_version,\n  model,\n  detected_intent,\n  risk_level\n};"
+      }
+    },
+    {
+      "id": "db582e0e-0b62-4f16-be34-1ed8f99e004e",
+      "name": "POST AI Interaction",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        2464,
+        384
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "http://host.docker.internal:8000/inbound/ai_interaction",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({\n  response_id: (() => { const rid = $json.response_id || null; return /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/.test(String(rid || \"\")) ? rid : null; })(),\n  student_id: (() => { const sid = $json.student_id || $node[\"GET Session Context\"].json.student_id || null; return /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/.test(String(sid || \"\")) ? sid : null; })(),\n  prompt_version: $json.prompt_version || \"\",\n  model: $json.model || \"\",\n  input_text: $node[\"Webhook Chat\"].json.body?.message_text || $node[\"Webhook Chat\"].json.message_text || \"\",\n  output_text: $json.response_text || \"\",\n  classified_reason: $json.detected_intent || \"\",\n  risk_level: $json.risk_level || \"\"\n}) }}"
+      }
+    },
+    {
+      "id": "bbaa3a09-5c09-4604-8bb8-ae7d6aa3d474",
+      "name": "Evolution API Send",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        2688,
+        384
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "http://host.docker.internal:8080/message/sendText/escola-decia",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "apikey",
+              "value": "clinivet_global_key_2026"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({\n  number: (($node[\"GET Session Context\"].json.reply_to_jid || $node[\"GET Session Context\"].json.wa_jid || $node[\"Webhook Chat\"].json.body?.sender_jid || $node[\"Webhook Chat\"].json.sender_jid || \"\").endsWith('@lid')) ?\n          ($node[\"GET Session Context\"].json.reply_to_jid || $node[\"GET Session Context\"].json.wa_jid || $node[\"Webhook Chat\"].json.body?.sender_jid || $node[\"Webhook Chat\"].json.sender_jid || \"\") :\n          ($node[\"GET Session Context\"].json.reply_to_jid || $node[\"GET Session Context\"].json.wa_jid || $node[\"Webhook Chat\"].json.body?.sender_jid || $node[\"Webhook Chat\"].json.sender_jid || \"\").split('@')[0],\n  text: $node[\"Consolidar Contexto\"].json.response_text\n}) }}",
+        "options": {
+          "timeout": 30000
+        }
+      }
+    },
+    {
+      "id": "7fb64d46-7dfd-42e6-942f-20d8f8d1c632",
+      "name": "Set Response Final",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        2912,
+        384
+      ],
+      "parameters": {
+        "mode": "manual",
+        "assignments": {
+          "assignments": []
+        }
+      }
+    },
+    {
+      "id": "6927d594-da2b-41fd-8478-ecc66980480f",
+      "name": "Respond to Webhook",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.5,
+      "position": [
+        3136,
+        384
+      ],
+      "parameters": {
+        "respondWith": "firstIncomingItem"
+      }
+    }
+  ],
+  "activeVersion": {
+    "nodes": [
+      {
+        "id": "43bedc69-e30c-44c3-8036-4d80c508359b",
+        "name": "Webhook Chat",
+        "type": "n8n-nodes-base.webhook",
+        "typeVersion": 2.1,
+        "position": [
+          0,
+          384
+        ],
+        "parameters": {
+          "httpMethod": "POST",
+          "path": "chat-interaction",
+          "responseMode": "responseNode",
+          "options": {}
+        },
+        "webhookId": "9ac63f44-7dcb-443e-bb52-84fb552a5a57"
+      },
+      {
+        "id": "1296d4f1-948a-4ad0-979c-fe5cd74ca188",
+        "name": "GET Session Context",
+        "type": "n8n-nodes-base.httpRequest",
+        "typeVersion": 4.4,
+        "position": [
+          224,
+          384
+        ],
+        "parameters": {
+          "url": "http://host.docker.internal:8000/students/session_context",
+          "sendQuery": true,
+          "queryParameters": {
+            "parameters": [
+              {
+                "name": "sender_jid",
+                "value": "={{ $json.body?.sender_jid || $json.sender_jid }}"
+              },
+              {
+                "name": "school_id",
+                "value": "={{ $json.body?.school_id || $json.school_id }}"
+              },
+              {
+                "name": "student_id",
+                "value": "={{ $json.body?.student_id || $json.student_id || \"\" }}"
+              }
+            ]
+          },
+          "options": {
+            "timeout": 30000
+          }
+        }
+      },
+      {
+        "id": "01cf7c99-e9c1-483b-bb8f-3d7fa815407e",
+        "name": "IA 1 - Classificador",
+        "type": "n8n-nodes-base.httpRequest",
+        "typeVersion": 4.4,
+        "position": [
+          448,
+          384
+        ],
+        "parameters": {
+          "method": "POST",
+          "url": "https://api.openai.com/v1/chat/completions",
+          "sendHeaders": true,
+          "headerParameters": {
+            "parameters": [
+              {
+                "name": "Authorization",
+                "value": "=Bearer {{ $env.OPENAI_API_KEY }}"
+              },
+              {
+                "name": "Content-Type",
+                "value": "application/json"
+              }
+            ]
+          },
+          "sendBody": true,
+          "specifyBody": "json",
+          "jsonBody": "={{ JSON.stringify({\n  model: \"gpt-4o-mini\",\n  messages: [\n    {\n      role: \"system\",\n      content: \"Você é a IA 1 (Classificador) da escola Décia. Seu único objetivo é classificar a intenção e o risco das mensagens recebidas e retornar estritamente um JSON.\\n\\nCampos no JSON:\\n- intent: 'JUSTIFICATIVA_FALTA' (se o responsável justifica faltas ou atrasos), 'DUVIDA_SECRETARIA' (dúvidas sobre horários, secretaria, documentos, matrículas), 'SAUDACAO' (cumprimentos como olá, bom dia, tudo bem), 'AGRADECIMENTO_DESPEDIDA' (agradecimentos como obrigado, valeu, ou despedidas como tchau, até mais), 'HUMANO' (solicitação explícita de falar com humano), ou 'DESCONHECIDO' (outros assuntos).\\n- category: 'DOENCA', 'TRABALHO', 'TRANSPORTE', 'FAMILIA', 'OUTRO' (se intent for JUSTIFICATIVA_FALTA), ou null caso contrário.\\n- risk_level: 'LOW' (baixo risco), 'MEDIUM' (desânimo, recorrência moderada), 'HIGH' (bullying, conflitos graves, problemas jurídicos, ameaças, agressividade, saúde mental grave).\\n- needs_human: true (se risk_level for HIGH, se houver agressividade/bullying, solicitação explícita ou tom conflituoso), ou false caso contrário.\\n- confidence: float entre 0.0 e 1.0 (grau de certeza na classificação).\\n\\nRegra de Ouro: Retorne APENAS o JSON. Não adicione texto explicativo ou markdown.\"\n    },\n    {\n      role: \"user\",\n      content: \"Contexto:\\n- Aluno: \" + ($node[\"GET Session Context\"].json.student_name || \"não identificado\") + \"\\n- Último Motivo: \" + ($node[\"GET Session Context\"].json.last_reason || \"não informado\") + \"\\n- Campanha: \" + ($node[\"GET Session Context\"].json.campaign_name || \"não informado\") + \"\\n- Dias Falta: \" + ($node[\"GET Session Context\"].json.campaign_absence_days || \"não informado\") + \"\\n\\nHistórico Recente:\\n\" + JSON.stringify($node[\"GET Session Context\"].json.messages || [], null, 2) + \"\\n\\nMensagem Atual: \" + ($node[\"Webhook Chat\"].json.message_text || $node[\"Webhook Chat\"].json.body?.message_text || \"\") + \"\\n\\nRetorne agora a classificação JSON estrita.\"\n    }\n  ],\n  response_format: { type: \"json_object\" }\n}) }}"
+        }
+      },
+      {
+        "id": "295329f6-4c68-4e3c-91c8-876d8f544502",
+        "name": "Parse Classificador Segura",
+        "type": "n8n-nodes-base.code",
+        "typeVersion": 2,
+        "position": [
+          672,
+          384
+        ],
+        "parameters": {
+          "mode": "runOnceForEachItem",
+          "jsCode": "let response = {\n  intent: \"DESCONHECIDO\",\n  category: null,\n  risk_level: \"LOW\",\n  needs_human: true,\n  confidence: 0.0,\n  needs_review: true,\n  handoff_reason: \"erro_classificacao\"\n};\n\ntry {\n  let content = $json.choices[0].message.content.trim();\n  if (content.startsWith(\"```json\")) {\n    content = content.substring(7);\n  }\n  if (content.endsWith(\"```\")) {\n    content = content.substring(0, content.length - 3);\n  }\n  let parsed = JSON.parse(content.trim());\n  \n  response.intent = parsed.intent || \"DESCONHECIDO\";\n  response.category = parsed.category || null;\n  response.risk_level = parsed.risk_level || \"LOW\";\n  response.needs_human = parsed.needs_human === true || parsed.needs_human === \"true\";\n  response.confidence = parseFloat(parsed.confidence) || 0.0;\n  response.needs_review = response.needs_human;\n  \n  // Se a confiança for menor que 0.75, força handoff humano\n  if (response.confidence < 0.75) {\n    response.needs_human = true;\n    response.needs_review = true;\n    response.handoff_reason = \"baixa_confianca\";\n  } else if (response.needs_human) {\n    response.handoff_reason = parsed.category || \"detectado_ia\";\n  }\n} catch (e) {\n  response.needs_human = true;\n  response.needs_review = true;\n  response.handoff_reason = \"erro_json_parse\";\n}\n\nreturn response;"
+        }
+      },
+      {
+        "id": "07cf3f61-84fb-4159-8ad8-9c0b7430f5b3",
+        "name": "Roteador por Intenção",
+        "type": "n8n-nodes-base.switch",
+        "typeVersion": 3,
+        "position": [
+          896,
+          336
+        ],
+        "parameters": {
+          "mode": "expression",
+          "numberOutputs": 5,
+          "output": "={{ $json.needs_human === true || $json.risk_level === \"HIGH\" || $json.intent === \"HUMANO\" ? 0 : ($json.intent === \"JUSTIFICATIVA_FALTA\" ? 1 : ($json.intent === \"DUVIDA_SECRETARIA\" ? 2 : ($json.intent === \"SAUDACAO\" || $json.intent === \"AGRADECIMENTO_DESPEDIDA\" ? 3 : 4))) }}"
+        }
+      },
+      {
+        "id": "6ec8b718-1e63-479e-a2f2-e7facaef69d9",
+        "name": "Configurar Handoff",
+        "type": "n8n-nodes-base.code",
+        "typeVersion": 2,
+        "position": [
+          1568,
+          0
+        ],
+        "parameters": {
+          "mode": "runOnceForEachItem",
+          "jsCode": "let input = $json;\nreturn {\n  response_text: \"Agradecemos sua mensagem. Nossa equipe registrou as informações e seguirá acompanhando o caso.\",\n  model: \"static_handoff\",\n  prompt_version: \"v1\",\n  detected_intent: input.intent || \"HUMANO\",\n  risk_level: input.risk_level || \"LOW\",\n  handoff_reason: input.handoff_reason || \"detectado_ia\"\n};"
+        }
+      },
+      {
+        "id": "73a3eba8-9e3c-4275-bb6b-71ff4ea141ee",
+        "name": "Backend: Registrar Handoff",
+        "type": "n8n-nodes-base.httpRequest",
+        "typeVersion": 4.4,
+        "position": [
+          1792,
+          0
+        ],
+        "parameters": {
+          "method": "POST",
+          "url": "http://host.docker.internal:8000/inbound/reply",
+          "sendBody": true,
+          "specifyBody": "json",
+          "jsonBody": "={{ JSON.stringify({\n  school_id: $node[\"Webhook Chat\"].json.body?.school_id || $node[\"Webhook Chat\"].json.school_id,\n  sender_jid: $node[\"Webhook Chat\"].json.body?.sender_jid || $node[\"Webhook Chat\"].json.sender_jid,\n  raw_message_id: ($node[\"Webhook Chat\"].json.body?.response_id || $node[\"Webhook Chat\"].json.response_id || $node[\"Webhook Chat\"].json.raw_message_id || $node[\"Webhook Chat\"].json.body?.raw_message_id || (\"n8n-\" + ($node[\"Webhook Chat\"].json.body?.sender_jid || $node[\"Webhook Chat\"].json.sender_jid || \"unknown\") + \"-\" + ($node[\"Webhook Chat\"].json.body?.received_at || $node[\"Webhook Chat\"].json.received_at || \"no-date\"))),\n  body: ($node[\"Webhook Chat\"].json.body?.message_text || $node[\"Webhook Chat\"].json.message_text || (($node[\"GET Session Context\"].json.messages || []).filter(m => m.text).slice(-1)[0]?.text) || \"[mensagem sem texto]\"),\n  student_id: $node[\"Webhook Chat\"].json.body?.student_id || $node[\"Webhook Chat\"].json.student_id || $node[\"GET Session Context\"].json.student_id || null,\n  campaign_id: $node[\"GET Session Context\"].json.campaign_id || null,\n  identity_confidence: \"HIGH\",\n  needs_review: true,\n  handoff_reason: $json.handoff_reason || \"handoff\",\n  detected_intent: $json.detected_intent || $json.intent || \"HUMANO\",\n  risk_level: $json.risk_level || \"LOW\",\n  received_at: $node[\"Webhook Chat\"].json.body?.received_at || $node[\"Webhook Chat\"].json.received_at\n}) }}",
+          "options": {
+            "timeout": 30000
+          }
+        }
+      },
+      {
+        "id": "d5cf736a-2bb3-4547-8753-4dd7ede0c0e0",
+        "name": "Merge Branches",
+        "type": "n8n-nodes-base.merge",
+        "typeVersion": 3,
+        "position": [
+          2016,
+          336
+        ],
+        "parameters": {
+          "mode": "append",
+          "numberInputs": 5
+        }
+      },
+      {
+        "id": "0284080e-6037-47cb-bff1-783259109f81",
+        "name": "Backend: Registrar Falta",
+        "type": "n8n-nodes-base.httpRequest",
+        "typeVersion": 4.4,
+        "position": [
+          1344,
+          192
+        ],
+        "parameters": {
+          "method": "POST",
+          "url": "http://host.docker.internal:8000/inbound/reply",
+          "sendBody": true,
+          "specifyBody": "json",
+          "jsonBody": "={{ JSON.stringify({\n  school_id: $node[\"Webhook Chat\"].json.body?.school_id || $node[\"Webhook Chat\"].json.school_id,\n  sender_jid: $node[\"Webhook Chat\"].json.body?.sender_jid || $node[\"Webhook Chat\"].json.sender_jid,\n  raw_message_id: ($node[\"Webhook Chat\"].json.body?.response_id || $node[\"Webhook Chat\"].json.response_id || $node[\"Webhook Chat\"].json.raw_message_id || $node[\"Webhook Chat\"].json.body?.raw_message_id || (\"n8n-\" + ($node[\"Webhook Chat\"].json.body?.sender_jid || $node[\"Webhook Chat\"].json.sender_jid || \"unknown\") + \"-\" + ($node[\"Webhook Chat\"].json.body?.received_at || $node[\"Webhook Chat\"].json.received_at || \"no-date\"))),\n  body: ($node[\"Webhook Chat\"].json.body?.message_text || $node[\"Webhook Chat\"].json.message_text || (($node[\"GET Session Context\"].json.messages || []).filter(m => m.text).slice(-1)[0]?.text) || \"[mensagem sem texto]\"),\n  student_id: $node[\"Webhook Chat\"].json.body?.student_id || $node[\"Webhook Chat\"].json.student_id || $node[\"GET Session Context\"].json.student_id || null,\n  campaign_id: $node[\"GET Session Context\"].json.campaign_id || null,\n  reason: $json.category === \"DOENCA\" ? \"ILLNESS\" : ($json.category === \"TRABALHO\" ? \"WORK\" : ($json.category === \"TRANSPORTE\" ? \"SCHOOL_ISSUE\" : ($json.category === \"FAMILIA\" ? \"FAMILY\" : \"OTHER\"))),\n  ai_confidence: $json.confidence,\n  identity_confidence: \"HIGH\",\n  needs_review: false,\n  detected_intent: $json.intent || \"JUSTIFICATIVA_FALTA\",\n  risk_level: $json.risk_level || \"LOW\",\n  received_at: $node[\"Webhook Chat\"].json.body?.received_at || $node[\"Webhook Chat\"].json.received_at\n}) }}",
+          "options": {
+            "timeout": 30000
+          }
+        }
+      },
+      {
+        "id": "b3728d06-b0c3-404b-8abe-52a1951294eb",
+        "name": "IA 2 — Resposta Justificativa",
+        "type": "n8n-nodes-base.httpRequest",
+        "typeVersion": 4.4,
+        "position": [
+          1568,
+          192
+        ],
+        "parameters": {
+          "method": "POST",
+          "url": "https://api.openai.com/v1/chat/completions",
+          "sendHeaders": true,
+          "headerParameters": {
+            "parameters": [
+              {
+                "name": "Authorization",
+                "value": "=Bearer {{ $env.OPENAI_API_KEY }}"
+              },
+              {
+                "name": "Content-Type",
+                "value": "application/json"
+              }
+            ]
+          },
+          "sendBody": true,
+          "specifyBody": "json",
+          "jsonBody": "={{ JSON.stringify({\n  model: \"gpt-4o-mini\",\n  messages: [\n    {\n      role: \"system\",\n      content: \"Você é a IA 2 (Gerador de Resposta) da escola Décia. Seu objetivo é acolher o contato do responsável e tratar o registro da justificativa de falta de forma extremamente empática, humana e atenciosa.\\n\\nRegras importantes:\\n1. Retorne estritamente um JSON com a chave \\\"response_text\\\" contendo a resposta gerada.\\n2. Identifique se o nome do aluno está no contexto.\\n- Se o nome do aluno for nulo, \\\"aluno\\\" ou não identificado, responda de forma muito solícita e acolhedora dizendo que registrou o aviso da falta, mas que para podermos formalizar e justificar no sistema da escola, você precisa que ela informe o *nome completo do aluno* e a *turma* dele.\\n- Se o nome do aluno estiver identificado (ex: João da Silva), confirme o recebimento da justificativa de forma empática usando o nome dele (ex: deseje melhoras rápidas se for por motivo de saúde/doença, demonstre compreensão e apoio se for por motivo de trabalho ou questões familiares/luto).\\n3. REGRA DE CONVERSAÇÃO CONTINUADA: Se você analisar o Histórico Recente da Conversa e verificar que a falta deste aluno JÁ foi registrada ou confirmada na interação anterior (ou seja, se a mensagem anterior do bot já confirmou o registro), NÃO repita a confirmação formal. Em vez disso, seja muito breve (1 ou 2 frases curtas) apenas agradecendo pelos novos detalhes ou desejando melhoras/apoio direto. Exemplo: 'Agradeço por detalhar, já atualizei aqui. Estimamos uma rápida melhora para ele!'\\n4. Seja natural, acolhedor e carinhoso. Evite respostas secas ou robóticas.\\n5. Nunca use termos como \\\"assistente virtual\\\", \\\"robô\\\" ou \\\"sistema\\\". Fale como uma pessoa atenciosa da equipe da Escola Décia.\"\n    },\n    {\n      role: \"user\",\n      content: \"Contexto:\\n- Nome Aluno: \" + ($node[\"GET Session Context\"].json.student_name || \"aluno\") + \"\\n- Categoria Falta: \" + ($node[\"Parse Classificador Segura\"].json.category || \"não informada\") + \"\\n- Último Motivo Registrado: \" + ($node[\"GET Session Context\"].json.last_reason || \"não informado\") + \"\\n\\nHistórico Recente da Conversa:\\n\" + JSON.stringify($node[\"GET Session Context\"].json.messages || [], null, 2) + \"\\n\\nMensagem Atual do Responsável: \" + ($node[\"Webhook Chat\"].json.message_text || $node[\"Webhook Chat\"].json.body?.message_text || \"\") + \"\\n\\nEscreva a resposta final atenciosa.\"\n    }\n  ],\n  response_format: { type: \"json_object\" }\n}) }}",
+          "options": {
+            "timeout": 30000
+          }
+        }
+      },
+      {
+        "id": "98c1695a-7685-4baa-b407-ab52e02da8cf",
+        "name": "Parse Resposta Justificativa",
+        "type": "n8n-nodes-base.code",
+        "typeVersion": 2,
+        "position": [
+          1792,
+          192
+        ],
+        "parameters": {
+          "mode": "runOnceForEachItem",
+          "jsCode": "let response = {\n  response_text: \"Agradecemos sua mensagem. Nossa equipe registrou as informações e seguirá acompanhando o caso.\",\n  model: $json.model || \"gpt-4o-mini\",\n  prompt_version: \"v2\",\n  detected_intent: \"JUSTIFICATIVA_FALTA\",\n  risk_level: \"LOW\",\n  response_id: null,\n  student_id: null,\n  campaign_id: null\n};\ntry {\n  const saved = $(\"Backend: Registrar Falta\").first().json;\n  response.response_id = saved.response_id || null;\n  response.student_id = saved.student_id || null;\n  response.campaign_id = saved.campaign_id || null;\n} catch (e) {\n  // keep correlation fields null when the registration node did not return them\n}\ntry {\n  let content = $json.choices[0].message.content.trim();\n  let parsed = JSON.parse(content);\n  response.response_text = parsed.response_text || response.response_text;\n} catch (e) {\n  // fallback if JSON parsing fails\n}\nreturn response;"
+        }
+      },
+      {
+        "id": "40fc04ab-fb1c-4e17-8b38-0d2d9f147482",
+        "name": "GET School Knowledge",
+        "type": "n8n-nodes-base.httpRequest",
+        "typeVersion": 4.4,
+        "position": [
+          1120,
+          384
+        ],
+        "parameters": {
+          "url": "={{ $node[\"Webhook Chat\"].json.body?.school_id ? ('http://host.docker.internal:8000/api/v1/schools/' + $node[\"Webhook Chat\"].json.body.school_id + '/knowledge') : 'http://host.docker.internal:8000/api/v1/schools/aac99735-32cb-4615-b2cb-0be315f18374/knowledge' }}",
+          "sendQuery": true,
+          "queryParameters": {
+            "parameters": [
+              {
+                "name": "query",
+                "value": "={{ $node[\"Webhook Chat\"].json.body?.message_text || $node[\"Webhook Chat\"].json.message_text || '' }}"
+              },
+              {
+                "name": "limit",
+                "value": "3"
+              }
+            ]
+          },
+          "options": {
+            "continueOnFail": true,
+            "timeout": 10000
+          }
+        },
+        "settings": {
+          "onError": "continue"
+        }
+      },
+      {
+        "id": "eafcb84d-ef07-430a-ad4f-771a05fd8479",
+        "name": "Agrupar RAG",
+        "type": "n8n-nodes-base.code",
+        "typeVersion": 2,
+        "position": [
+          1344,
+          384
+        ],
+        "parameters": {
+          "mode": "runOnceForAllItems",
+          "jsCode": "return [{\n  json: {\n    results: $input.all().map(item => item.json)\n  }\n}];"
+        }
+      },
+      {
+        "id": "ab55972b-ea71-48f7-9cd9-018dc2a5643e",
+        "name": "IA 2 — Resposta SAC",
+        "type": "n8n-nodes-base.httpRequest",
+        "typeVersion": 4.4,
+        "position": [
+          1568,
+          384
+        ],
+        "parameters": {
+          "method": "POST",
+          "url": "https://api.openai.com/v1/chat/completions",
+          "sendHeaders": true,
+          "headerParameters": {
+            "parameters": [
+              {
+                "name": "Authorization",
+                "value": "=Bearer {{ $env.OPENAI_API_KEY }}"
+              },
+              {
+                "name": "Content-Type",
+                "value": "application/json"
+              }
+            ]
+          },
+          "sendBody": true,
+          "specifyBody": "json",
+          "jsonBody": "={{ JSON.stringify({\n  model: \"gpt-4o-mini\",\n  messages: [\n    {\n      role: \"system\",\n      content: \"Você é a IA 2 (Gerador de Resposta SAC) da escola Décia. Seu objetivo é responder dúvidas simples de secretaria, horários ou documentação de forma extremamente acolhedora, humana e atenciosa.\\n\\nRegras estritas:\\n1. Retorne estritamente um JSON com a chave \\\"response_text\\\" contendo a resposta gerada.\\n2. Seja prestativo, empático e atencioso. Se o usuário estiver perguntando algo que requer uma explicação mais completa, sinta-se à vontade para fornecer uma resposta detalhada e explicativa, mas mantenha a clareza. Evite respostas excessivamente curtas ou secas; converse de forma carinhosa.\\n3. Utilize as informações oficiais do Contexto Oficial RAG fornecido abaixo. Priorize sempre este contexto oficial. Se a resposta exata não constar no contexto, infoe de forma gentil que não tem a resposta exata no momento, mas que a equipe humana vai analisar a dúvida em breve. Nunca invente horários, salas ou regras que não estejam no contexto.\\n4. Nunca tente responder a denúncias, agressões, assédio, ou temas delicados de saúde mental — infoe com sensibilidade que a coordenação foi acionada e entrará em contato em breve.\"\n    },\n    {\n      role: \"user\",\n      content: \"Dúvida do Responsável: \" + ($node[\"Webhook Chat\"].json.message_text || $node[\"Webhook Chat\"].json.body?.message_text || \"\") + \"\\n\\nContexto Oficial RAG:\\n\" + JSON.stringify($node[\"Agrupar RAG\"].json.results || []) + \"\\n\\nEscreva a resposta final atenciosa.\"\n    }\n  ],\n  response_format: { type: \"json_object\" }\n}) }}"
+        }
+      },
+      {
+        "id": "4c037eb5-00d0-4098-b40d-e98c565d7642",
+        "name": "Parse Resposta SAC",
+        "type": "n8n-nodes-base.code",
+        "typeVersion": 2,
+        "position": [
+          1792,
+          384
+        ],
+        "parameters": {
+          "mode": "runOnceForEachItem",
+          "jsCode": "let response = {\n  response_text: \"Agradecemos sua mensagem. Nossa equipe registrou as informações e seguirá acompanhando o caso.\",\n  model: $json.model || \"gpt-4o-mini\",\n  prompt_version: \"v2\",\n  detected_intent: \"DUVIDA_SECRETARIA\",\n  risk_level: \"LOW\"\n};\ntry {\n  let content = $json.choices[0].message.content.trim();\n  let parsed = JSON.parse(content);\n  response.response_text = parsed.response_text || response.response_text;\n} catch (e) {\n  // fallback\n}\nreturn response;"
+        }
+      },
+      {
+        "id": "b982d3aa-b59d-446d-90ba-8ebf6e046686",
+        "name": "Configurar Cortesia",
+        "type": "n8n-nodes-base.code",
+        "typeVersion": 2,
+        "position": [
+          1568,
+          576
+        ],
+        "parameters": {
+          "mode": "runOnceForEachItem",
+          "jsCode": "let input = $json;\nlet intent = input.intent || \"SAUDACAO\";\nlet push_name = $(\"Webhook Chat\").first().json.body?.push_name || $(\"Webhook Chat\").first().json.push_name || \"\";\nlet first_name = push_name ? push_name.split(' ')[0] : \"\";\nlet text = \"\";\n\nif (intent === \"SAUDACAO\") {\n  text = first_name ? `Olá, ${first_name}! Tudo bem? Como posso te ajudar hoje?` : \"Olá! Tudo bem? Como podemos ajudar hoje?\";\n} else {\n  text = first_name ? `Por nada, ${first_name}! Se precisar de mais alguma coisa, estamos à disposição.` : \"Por nada! Se precisar de mais alguma coisa, a escola está à disposição.\";\n}\n\nreturn {\n  response_text: text,\n  model: \"static_cortesia\",\n  prompt_version: \"v1\",\n  detected_intent: intent,\n  risk_level: \"LOW\"\n};"
+        }
+      },
+      {
+        "id": "41de200b-542a-462f-9733-b734c999d6ff",
+        "name": "Backend: Registrar Cortesia",
+        "type": "n8n-nodes-base.httpRequest",
+        "typeVersion": 4.4,
+        "position": [
+          1792,
+          576
+        ],
+        "parameters": {
+          "method": "POST",
+          "url": "http://host.docker.internal:8000/inbound/reply",
+          "sendBody": true,
+          "specifyBody": "json",
+          "jsonBody": "={{ JSON.stringify({\n  school_id: $node[\"Webhook Chat\"].json.body?.school_id || $node[\"Webhook Chat\"].json.school_id,\n  sender_jid: $node[\"Webhook Chat\"].json.body?.sender_jid || $node[\"Webhook Chat\"].json.sender_jid,\n  raw_message_id: ($node[\"Webhook Chat\"].json.body?.response_id || $node[\"Webhook Chat\"].json.response_id || $node[\"Webhook Chat\"].json.raw_message_id || $node[\"Webhook Chat\"].json.body?.raw_message_id || (\"n8n-\" + ($node[\"Webhook Chat\"].json.body?.sender_jid || $node[\"Webhook Chat\"].json.sender_jid || \"unknown\") + \"-\" + ($node[\"Webhook Chat\"].json.body?.received_at || $node[\"Webhook Chat\"].json.received_at || \"no-date\"))),\n  body: ($node[\"Webhook Chat\"].json.body?.message_text || $node[\"Webhook Chat\"].json.message_text || (($node[\"GET Session Context\"].json.messages || []).filter(m => m.text).slice(-1)[0]?.text) || \"[mensagem sem texto]\"),\n  student_id: $node[\"Webhook Chat\"].json.body?.student_id || $node[\"Webhook Chat\"].json.student_id || $node[\"GET Session Context\"].json.student_id || null,\n  campaign_id: $node[\"GET Session Context\"].json.campaign_id || null,\n  identity_confidence: \"HIGH\",\n  needs_review: false,\n  handoff_reason: \"cortesia\",\n  detected_intent: $node[\"Parse Classificador Segura\"].json.intent || \"SAUDACAO\",\n  risk_level: \"LOW\",\n  received_at: $node[\"Webhook Chat\"].json.body?.received_at || $node[\"Webhook Chat\"].json.received_at\n}) }}",
+          "options": {
+            "continueOnFail": true,
+            "timeout": 30000
+          }
+        },
+        "settings": {
+          "onError": "continue"
+        }
+      },
+      {
+        "id": "8af013b4-6cb4-4941-be38-9d93996677aa",
+        "name": "Configurar Fallback",
+        "type": "n8n-nodes-base.code",
+        "typeVersion": 2,
+        "position": [
+          1568,
+          768
+        ],
+        "parameters": {
+          "mode": "runOnceForEachItem",
+          "jsCode": "let input = $json;\nreturn {\n  response_text: \"Agradecemos sua mensagem. Nossa equipe registrou as informações e seguirá acompanhando o caso.\",\n  model: \"static_fallback\",\n  prompt_version: \"v1\",\n  detected_intent: \"DESCONHECIDO\",\n  risk_level: \"LOW\",\n  handoff_reason: \"fallback\"\n};"
+        }
+      },
+      {
+        "id": "f5a9075a-813e-477a-b594-59bdcb77ab11",
+        "name": "Backend: Registrar Fallback",
+        "type": "n8n-nodes-base.httpRequest",
+        "typeVersion": 4.4,
+        "position": [
+          1792,
+          768
+        ],
+        "parameters": {
+          "method": "POST",
+          "url": "http://host.docker.internal:8000/inbound/reply",
+          "sendBody": true,
+          "specifyBody": "json",
+          "jsonBody": "={{ JSON.stringify({\n  school_id: $node[\"Webhook Chat\"].json.body?.school_id || $node[\"Webhook Chat\"].json.school_id,\n  sender_jid: $node[\"Webhook Chat\"].json.body?.sender_jid || $node[\"Webhook Chat\"].json.sender_jid,\n  raw_message_id: ($node[\"Webhook Chat\"].json.body?.response_id || $node[\"Webhook Chat\"].json.response_id || $node[\"Webhook Chat\"].json.raw_message_id || $node[\"Webhook Chat\"].json.body?.raw_message_id || (\"n8n-\" + ($node[\"Webhook Chat\"].json.body?.sender_jid || $node[\"Webhook Chat\"].json.sender_jid || \"unknown\") + \"-\" + ($node[\"Webhook Chat\"].json.body?.received_at || $node[\"Webhook Chat\"].json.received_at || \"no-date\"))),\n  body: ($node[\"Webhook Chat\"].json.body?.message_text || $node[\"Webhook Chat\"].json.message_text || (($node[\"GET Session Context\"].json.messages || []).filter(m => m.text).slice(-1)[0]?.text) || \"[mensagem sem texto]\"),\n  student_id: $node[\"Webhook Chat\"].json.body?.student_id || $node[\"Webhook Chat\"].json.student_id || $node[\"GET Session Context\"].json.student_id || null,\n  campaign_id: $node[\"GET Session Context\"].json.campaign_id || null,\n  identity_confidence: \"HIGH\",\n  needs_review: true,\n  handoff_reason: \"desconhecido\",\n  detected_intent: \"DESCONHECIDO\",\n  risk_level: \"LOW\",\n  received_at: $node[\"Webhook Chat\"].json.body?.received_at || $node[\"Webhook Chat\"].json.received_at\n}) }}",
+          "options": {
+            "timeout": 30000
+          }
+        }
+      },
+      {
+        "id": "8c8ce7f7-0f95-482b-b384-4ba0ebdc2614",
+        "name": "Consolidar Contexto",
+        "type": "n8n-nodes-base.code",
+        "typeVersion": 2,
+        "position": [
+          2240,
+          384
+        ],
+        "parameters": {
+          "mode": "runOnceForEachItem",
+          "jsCode": "let response_text = \"Agradecemos sua mensagem. Nossa equipe registrou as informações e seguirá acompanhando o caso.\";\nlet prompt_version = \"\";\nlet model = \"\";\nlet detected_intent = \"\";\nlet risk_level = \"\";\n\nif ($(\"Parse Resposta Justificativa\").isExecuted) {\n  const data = $(\"Parse Resposta Justificativa\").first().json;\n  response_text = data.response_text || response_text;\n  prompt_version = data.prompt_version || \"\";\n  model = data.model || \"\";\n  detected_intent = data.detected_intent || \"\";\n  risk_level = data.risk_level || \"\";\n} else if ($(\"Parse Resposta SAC\").isExecuted) {\n  const data = $(\"Parse Resposta SAC\").first().json;\n  response_text = data.response_text || response_text;\n  prompt_version = data.prompt_version || \"\";\n  model = data.model || \"\";\n  detected_intent = data.detected_intent || \"\";\n  risk_level = data.risk_level || \"\";\n} else if ($(\"Configurar Handoff\").isExecuted) {\n  const data = $(\"Configurar Handoff\").first().json;\n  response_text = data.response_text || response_text;\n  prompt_version = data.prompt_version || \"\";\n  model = data.model || \"\";\n  detected_intent = data.detected_intent || \"\";\n  risk_level = data.risk_level || \"\";\n} else if ($(\"Configurar Cortesia\").isExecuted) {\n  const data = $(\"Configurar Cortesia\").first().json;\n  response_text = data.response_text || response_text;\n  prompt_version = data.prompt_version || \"\";\n  model = data.model || \"\";\n  detected_intent = data.detected_intent || \"\";\n  risk_level = data.risk_level || \"\";\n} else if ($(\"Configurar Fallback\").isExecuted) {\n  const data = $(\"Configurar Fallback\").first().json;\n  response_text = data.response_text || response_text;\n  prompt_version = data.prompt_version || \"\";\n  model = data.model || \"\";\n  detected_intent = data.detected_intent || \"\";\n  risk_level = data.risk_level || \"\";\n}\n\nreturn {\n  ...$json,\n  response_text,\n  prompt_version,\n  model,\n  detected_intent,\n  risk_level\n};"
+        }
+      },
+      {
+        "id": "db582e0e-0b62-4f16-be34-1ed8f99e004e",
+        "name": "POST AI Interaction",
+        "type": "n8n-nodes-base.httpRequest",
+        "typeVersion": 4.4,
+        "position": [
+          2464,
+          384
+        ],
+        "parameters": {
+          "method": "POST",
+          "url": "http://host.docker.internal:8000/inbound/ai_interaction",
+          "sendBody": true,
+          "specifyBody": "json",
+          "jsonBody": "={{ JSON.stringify({\n  response_id: (() => { const rid = $json.response_id || null; return /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/.test(String(rid || \"\")) ? rid : null; })(),\n  student_id: (() => { const sid = $json.student_id || $node[\"GET Session Context\"].json.student_id || null; return /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/.test(String(sid || \"\")) ? sid : null; })(),\n  prompt_version: $json.prompt_version || \"\",\n  model: $json.model || \"\",\n  input_text: $node[\"Webhook Chat\"].json.body?.message_text || $node[\"Webhook Chat\"].json.message_text || \"\",\n  output_text: $json.response_text || \"\",\n  classified_reason: $json.detected_intent || \"\",\n  risk_level: $json.risk_level || \"\"\n}) }}"
+        }
+      },
+      {
+        "id": "bbaa3a09-5c09-4604-8bb8-ae7d6aa3d474",
+        "name": "Evolution API Send",
+        "type": "n8n-nodes-base.httpRequest",
+        "typeVersion": 4.4,
+        "position": [
+          2688,
+          384
+        ],
+        "parameters": {
+          "method": "POST",
+          "url": "http://host.docker.internal:8080/message/sendText/escola-decia",
+          "sendHeaders": true,
+          "headerParameters": {
+            "parameters": [
+              {
+                "name": "apikey",
+                "value": "clinivet_global_key_2026"
+              },
+              {
+                "name": "Content-Type",
+                "value": "application/json"
+              }
+            ]
+          },
+          "sendBody": true,
+          "specifyBody": "json",
+          "jsonBody": "={{ JSON.stringify({\n  number: (($node[\"GET Session Context\"].json.reply_to_jid || $node[\"GET Session Context\"].json.wa_jid || $node[\"Webhook Chat\"].json.body?.sender_jid || $node[\"Webhook Chat\"].json.sender_jid || \"\").endsWith('@lid')) ?\n          ($node[\"GET Session Context\"].json.reply_to_jid || $node[\"GET Session Context\"].json.wa_jid || $node[\"Webhook Chat\"].json.body?.sender_jid || $node[\"Webhook Chat\"].json.sender_jid || \"\") :\n          ($node[\"GET Session Context\"].json.reply_to_jid || $node[\"GET Session Context\"].json.wa_jid || $node[\"Webhook Chat\"].json.body?.sender_jid || $node[\"Webhook Chat\"].json.sender_jid || \"\").split('@')[0],\n  text: $node[\"Consolidar Contexto\"].json.response_text\n}) }}",
+          "options": {
+            "timeout": 30000
+          }
+        }
+      },
+      {
+        "id": "7fb64d46-7dfd-42e6-942f-20d8f8d1c632",
+        "name": "Set Response Final",
+        "type": "n8n-nodes-base.set",
+        "typeVersion": 3.4,
+        "position": [
+          2912,
+          384
+        ],
+        "parameters": {
+          "mode": "manual",
+          "assignments": {
+            "assignments": []
+          }
+        }
+      },
+      {
+        "id": "6927d594-da2b-41fd-8478-ecc66980480f",
+        "name": "Respond to Webhook",
+        "type": "n8n-nodes-base.respondToWebhook",
+        "typeVersion": 1.5,
+        "position": [
+          3136,
+          384
+        ],
+        "parameters": {
+          "respondWith": "firstIncomingItem"
+        }
+      }
+    ],
+    "connections": {
+      "Webhook Chat": {
+        "main": [
+          [
+            {
+              "node": "GET Session Context",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "GET Session Context": {
+        "main": [
+          [
+            {
+              "node": "IA 1 - Classificador",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "IA 1 - Classificador": {
+        "main": [
+          [
+            {
+              "node": "Parse Classificador Segura",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Parse Classificador Segura": {
+        "main": [
+          [
+            {
+              "node": "Roteador por Intenção",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Roteador por Intenção": {
+        "main": [
+          [
+            {
+              "node": "Configurar Handoff",
+              "type": "main",
+              "index": 0
+            }
+          ],
+          [
+            {
+              "node": "Backend: Registrar Falta",
+              "type": "main",
+              "index": 0
+            }
+          ],
+          [
+            {
+              "node": "GET School Knowledge",
+              "type": "main",
+              "index": 0
+            }
+          ],
+          [
+            {
+              "node": "Configurar Cortesia",
+              "type": "main",
+              "index": 0
+            }
+          ],
+          [
+            {
+              "node": "Configurar Fallback",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Configurar Handoff": {
+        "main": [
+          [
+            {
+              "node": "Backend: Registrar Handoff",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Backend: Registrar Handoff": {
+        "main": [
+          [
+            {
+              "node": "Merge Branches",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Merge Branches": {
+        "main": [
+          [
+            {
+              "node": "Consolidar Contexto",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Backend: Registrar Falta": {
+        "main": [
+          [
+            {
+              "node": "IA 2 — Resposta Justificativa",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "IA 2 — Resposta Justificativa": {
+        "main": [
+          [
+            {
+              "node": "Parse Resposta Justificativa",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Parse Resposta Justificativa": {
+        "main": [
+          [
+            {
+              "node": "Merge Branches",
+              "type": "main",
+              "index": 1
+            }
+          ]
+        ]
+      },
+      "GET School Knowledge": {
+        "main": [
+          [
+            {
+              "node": "Agrupar RAG",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Agrupar RAG": {
+        "main": [
+          [
+            {
+              "node": "IA 2 — Resposta SAC",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "IA 2 — Resposta SAC": {
+        "main": [
+          [
+            {
+              "node": "Parse Resposta SAC",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Parse Resposta SAC": {
+        "main": [
+          [
+            {
+              "node": "Merge Branches",
+              "type": "main",
+              "index": 2
+            }
+          ]
+        ]
+      },
+      "Configurar Cortesia": {
+        "main": [
+          [
+            {
+              "node": "Backend: Registrar Cortesia",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Backend: Registrar Cortesia": {
+        "main": [
+          [
+            {
+              "node": "Merge Branches",
+              "type": "main",
+              "index": 3
+            }
+          ]
+        ]
+      },
+      "Configurar Fallback": {
+        "main": [
+          [
+            {
+              "node": "Backend: Registrar Fallback",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Backend: Registrar Fallback": {
+        "main": [
+          [
+            {
+              "node": "Merge Branches",
+              "type": "main",
+              "index": 4
+            }
+          ]
+        ]
+      },
+      "Consolidar Contexto": {
+        "main": [
+          [
+            {
+              "node": "POST AI Interaction",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "POST AI Interaction": {
+        "main": [
+          [
+            {
+              "node": "Evolution API Send",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Evolution API Send": {
+        "main": [
+          [
+            {
+              "node": "Set Response Final",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Set Response Final": {
+        "main": [
+          [
+            {
+              "node": "Respond to Webhook",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      }
+    }
   },
-  "versionId": "565988e0-bc1a-46bd-b263-f8e2b43b1bc9",
+  "tags": [],
   "meta": {
-    "instanceId": "fbe6e5635a0d162ae27cb986d1b2973c1ed3603decaab2c4c5be41a0ee0d7fe4"
+    "aiBuilderAssisted": true,
+    "builderVariant": "mcp"
   },
-  "id": "fhxyk5VwyqKicUUP",
-  "tags": []
+  "parentFolderId": null,
+  "description": "Conversational Chat Flow using RAG and OpenAI to classify and answer school attendance reasons and FAQs, with static and human handoff fallbacks.",
+  "scopes": [
+    "workflow:create",
+    "workflow:delete",
+    "workflow:execute",
+    "workflow:execute-chat",
+    "workflow:list",
+    "workflow:move",
+    "workflow:publish",
+    "workflow:read",
+    "workflow:share",
+    "workflow:unpublish",
+    "workflow:unshare",
+    "workflow:update",
+    "workflow:updateRedactionSetting"
+  ],
+  "canExecute": true
 }

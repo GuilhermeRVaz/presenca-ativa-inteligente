@@ -58,8 +58,8 @@ class InboundService:
         # Determine optimal debounce sleep time:
         # If the message is just a greeting/short intro, wait longer (e.g., 20s)
         # to allow the user to type their full question or justification.
-        # Otherwise, use the standard 8-second window.
-        sleep_seconds = 8.0
+        # Otherwise, use the standard 12-second window.
+        sleep_seconds = 12.0
         try:
             txt = (inbound.text or "").strip().lower()
             # Clean punctuation and check if it's a common short greeting

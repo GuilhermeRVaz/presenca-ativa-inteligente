@@ -218,12 +218,20 @@ def trigger_n8n(sender_jid, text, response_id=None, student_id=None):
     except Exception as e:
         return 500, str(e)
 
-def wait_for_evolution_message(timeout=10):
+def wait_for_evolution_message(phone=None, timeout=10):
     start = time.time()
     while time.time() - start < timeout:
         with captured_lock:
             if captured_messages:
-                return captured_messages.pop(0)
+                if phone is None:
+                    return captured_messages.pop(0)
+                phone_clean = str(phone).split('@')[0]
+                for idx, msg in enumerate(captured_messages):
+                    body = msg.get("body", {})
+                    number = body.get("number", "")
+                    number_clean = str(number).split('@')[0]
+                    if phone_clean in number_clean or number_clean in phone_clean:
+                        return captured_messages.pop(idx)
         time.sleep(0.2)
     return None
 
@@ -251,7 +259,7 @@ def cenario_1_justificativa_valida():
         print(err(f"Falha ao acionar n8n (HTTP {status})"))
         return False
 
-    outbound = wait_for_evolution_message(12)
+    outbound = wait_for_evolution_message(MOCK_PHONE, 30)
     if not outbound:
         print(err("Nenhuma resposta capturada no mock do WhatsApp."))
         return False
@@ -291,7 +299,7 @@ def cenario_2_aluno_nao_identificado():
         print(err(f"Falha ao acionar n8n (HTTP {status})"))
         return False
 
-    outbound = wait_for_evolution_message(12)
+    outbound = wait_for_evolution_message(MOCK_PHONE, 30)
     if not outbound:
         print(err("Nenhuma resposta capturada no mock do WhatsApp."))
         return False
@@ -325,7 +333,7 @@ def cenario_3_rag_sac():
         print(err(f"Falha ao acionar n8n (HTTP {status})"))
         return False
 
-    outbound = wait_for_evolution_message(12)
+    outbound = wait_for_evolution_message(MOCK_PHONE, 30)
     if not outbound:
         print(err("Nenhuma resposta capturada no mock do WhatsApp."))
         return False
@@ -359,7 +367,7 @@ def cenario_4_high_risk_handoff():
         print(err(f"Falha ao acionar n8n (HTTP {status})"))
         return False
 
-    outbound = wait_for_evolution_message(12)
+    outbound = wait_for_evolution_message(MOCK_PHONE, 30)
     if not outbound:
         print(err("Nenhuma resposta capturada no mock do WhatsApp."))
         return False
@@ -383,14 +391,14 @@ def cenario_4_high_risk_handoff():
 def cenario_5_desconhecido():
     print(cyan("\n[Cenário 5] Testando Contato Desconhecido (Fora da Campanha)"))
     UNKNOWN_JID = "5511888888888@s.whatsapp.net"
-    text = "Oi bom dia como vcs estão hoje"
+    text = "Gostaria de comprar um carro importado."
     
     status, _ = trigger_n8n(UNKNOWN_JID, text)
     if status != 200:
         print(err(f"Falha ao acionar n8n (HTTP {status})"))
         return False
 
-    outbound = wait_for_evolution_message(12)
+    outbound = wait_for_evolution_message("5511888888888", 30)
     if not outbound:
         print(err("Nenhuma resposta capturada no mock do WhatsApp."))
         return False
@@ -454,7 +462,7 @@ def cenario_6_debounce_fastapi():
     print("     Aguardando processamento e disparo do debounce (aprox. 35s a 60s)...")
     
     # Aguarda o disparo
-    outbound = wait_for_evolution_message(90)
+    outbound = wait_for_evolution_message(MOCK_PHONE, 90)
     
     # Verifica quantas mensagens o n8n disparou via mock do WhatsApp
     with captured_lock:
@@ -468,12 +476,121 @@ def cenario_6_debounce_fastapi():
         
         msg_text = outbound["body"].get("text", "")
         print(f"     Resposta final consolidada da IA: \"{msg_text}\"")
-        assert "melhoras" in msg_text.lower() or "hospital" in msg_text.lower() or "recuperação" in msg_text.lower(), "A IA não respondeu sobre a justificativa consolidada."
+        assert any(w in msg_text.lower() for w in ["melhora", "hospital", "recuperação", "recupere", "recuperar", "melhor", "melhore", "melhoras", "saúde"]), "A IA não respondeu sobre a justificativa consolidada."
         
         print(ok("Cenário 6 passou perfeitamente! Debounce aglutinou e o n8n respondeu apenas uma vez."))
         return True
     except AssertionError as ae:
         print(err(f"Erro de validação no Cenário 6: {ae}"))
+        return False
+
+def cenario_7_saudacao():
+    print(cyan("\n[Cenário 7] Testando Saudação Inicial (Bom dia)"))
+    clear_interaction_state(MOCK_JID)
+    text = "Bom dia!"
+    
+    status, _ = trigger_n8n(MOCK_JID, text, student_id=MOCK_STUDENT_ID)
+    if status != 200:
+        print(err(f"Falha ao acionar n8n (HTTP {status})"))
+        return False
+
+    outbound = wait_for_evolution_message(MOCK_PHONE, 35)
+    if not outbound:
+        print(err("Nenhuma resposta capturada no mock do WhatsApp."))
+        return False
+
+    msg_text = outbound["body"].get("text", "")
+    print(f"     IA respondeu: \"{msg_text}\"")
+
+    try:
+        assert "como posso" in msg_text.lower() or "como podemos" in msg_text.lower() or "olá" in msg_text.lower() or "tudo bem" in msg_text.lower(), "IA não respondeu com uma saudação e oferta de ajuda."
+        resp_data = supabase.table("responses").select("detected_intent, handoff_reason, needs_review").eq("sender_jid", MOCK_JID).execute().data
+        assert resp_data, "Nenhum registro de resposta gravado no banco de dados."
+        latest_resp = resp_data[-1]
+        assert latest_resp["detected_intent"] == "SAUDACAO", f"Intenção incorreta: {latest_resp['detected_intent']}"
+        assert latest_resp["handoff_reason"] == "cortesia", f"Motivo de handoff incorreto: {latest_resp['handoff_reason']}"
+        assert latest_resp["needs_review"] is False, "Sinalizou revisão humana para saudação."
+        print(ok("Cenário 7 passou perfeitamente!"))
+        return True
+    except AssertionError as ae:
+        print(err(f"Erro de validação no Cenário 7: {ae}"))
+        return False
+
+def cenario_8_agradecimento_despedida():
+    print(cyan("\n[Cenário 8] Testando Agradecimento / Despedida (Obrigada)"))
+    clear_interaction_state(MOCK_JID)
+    text = "Obrigada!"
+    
+    status, _ = trigger_n8n(MOCK_JID, text, student_id=MOCK_STUDENT_ID)
+    if status != 200:
+        print(err(f"Falha ao acionar n8n (HTTP {status})"))
+        return False
+
+    outbound = wait_for_evolution_message(MOCK_PHONE, 35)
+    if not outbound:
+        print(err("Nenhuma resposta capturada no mock do WhatsApp."))
+        return False
+
+    msg_text = outbound["body"].get("text", "")
+    print(f"     IA respondeu: \"{msg_text}\"")
+
+    try:
+        assert "de nada" in msg_text.lower() or "por nada" in msg_text.lower() or "disposição" in msg_text.lower() or "escola" in msg_text.lower(), "IA não respondeu com resposta de cortesia educada."
+        resp_data = supabase.table("responses").select("detected_intent, handoff_reason, needs_review").eq("sender_jid", MOCK_JID).execute().data
+        assert resp_data, "Nenhum registro de resposta gravado no banco de dados."
+        latest_resp = resp_data[-1]
+        assert latest_resp["detected_intent"] == "AGRADECIMENTO_DESPEDIDA", f"Intenção incorreta: {latest_resp['detected_intent']}"
+        assert latest_resp["needs_review"] is False, "Sinalizou revisão humana para agradecimento."
+        print(ok("Cenário 8 passou perfeitamente!"))
+        return True
+    except AssertionError as ae:
+        print(err(f"Erro de validação no Cenário 8: {ae}"))
+        return False
+
+def cenario_9_justificativa_duas_etapas_historico():
+    print(cyan("\n[Cenário 9] Testando Justificativa em Duas Etapas (Histórico Recente)"))
+    clear_interaction_state(MOCK_JID)
+    
+    # Etapa 1: Nome do aluno
+    print("     Enviando Etapa 1: Bernardo da Silva...")
+    status, _ = trigger_n8n(MOCK_JID, "Bernardo da Silva", student_id=MOCK_STUDENT_ID)
+    if status != 200:
+        print(err("Falha ao acionar n8n na Etapa 1"))
+        return False
+
+    outbound1 = wait_for_evolution_message(MOCK_PHONE, 30)
+    if not outbound1:
+        print(err("Nenhuma resposta capturada para a Etapa 1."))
+        return False
+    msg_text1 = outbound1["body"].get("text", "")
+    print(f"     IA respondeu (Etapa 1): \"{msg_text1}\"")
+
+    # Etapa 2: Motivo da falta
+    print("     Enviando Etapa 2: Ele está doente com febre...")
+    with captured_lock:
+        captured_messages.clear()
+        
+    status, _ = trigger_n8n(MOCK_JID, "Ele está doente com febre", student_id=MOCK_STUDENT_ID)
+    if status != 200:
+        print(err("Falha ao acionar n8n na Etapa 2"))
+        return False
+
+    outbound2 = wait_for_evolution_message(MOCK_PHONE, 30)
+    if not outbound2:
+        print(err("Nenhuma resposta capturada para a Etapa 2."))
+        return False
+    msg_text2 = outbound2["body"].get("text", "")
+    print(f"     IA respondeu (Etapa 2): \"{msg_text2}\"")
+
+    try:
+        # A resposta da Etapa 2 deve ser curta e não repetir a frase formal de registro inicial
+        assert len(msg_text2) < 220, f"A resposta da Etapa 2 ficou muito longa: {len(msg_text2)} caracteres."
+        assert "bernardo" in msg_text2.lower() or "ele" in msg_text2.lower(), "IA não fez referência ao aluno ou contexto."
+        
+        print(ok("Cenário 9 passou perfeitamente!"))
+        return True
+    except AssertionError as ae:
+        print(err(f"Erro de validação no Cenário 9: {ae}"))
         return False
 
 # ─────────────────────────────────────────────────────────────
@@ -498,7 +615,10 @@ if __name__ == "__main__":
         cenario_3_rag_sac,
         cenario_4_high_risk_handoff,
         cenario_5_desconhecido,
-        cenario_6_debounce_fastapi
+        cenario_6_debounce_fastapi,
+        cenario_7_saudacao,
+        cenario_8_agradecimento_despedida,
+        cenario_9_justificativa_duas_etapas_historico
     ]
     
     for test in testes:

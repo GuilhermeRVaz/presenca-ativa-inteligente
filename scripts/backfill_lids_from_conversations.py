@@ -57,11 +57,14 @@ def list_all_lid_chats() -> list[str]:
         if r.status_code == 200:
             data = r.json()
             if isinstance(data, list):
-                return [
-                    str(c.get("remoteJid") or c.get("id") or "")
-                    for c in data
-                    if str(c.get("remoteJid", "") or c.get("id", "")).endswith("@lid")
-                ]
+                res = []
+                for c in data:
+                    if not c or not isinstance(c, dict):
+                        continue
+                    remote_jid = str(c.get("remoteJid") or c.get("id") or "")
+                    if remote_jid.endswith("@lid"):
+                        res.append(remote_jid)
+                return res
     except Exception as e:
         print(f"  [ERR] findChats: {e}")
     return []
@@ -74,7 +77,13 @@ def fetch_conversation(jid: str, limit: int = 30) -> list[dict]:
     try:
         r = requests.post(url, json=payload, headers=HEADERS, timeout=15)
         if r.status_code == 200:
-            return r.json().get("messages", {}).get("records", [])
+            res_json = r.json()
+            if isinstance(res_json, dict):
+                messages = res_json.get("messages")
+                if isinstance(messages, dict):
+                    records = messages.get("records")
+                    if isinstance(records, list):
+                        return records
     except Exception:
         pass
     return []
@@ -84,13 +93,32 @@ def extract_protocols_from_records(records: list[dict]) -> list[str]:
     """Extrai protocolos P-XXXXXX das mensagens outbound (fromMe=True)."""
     protos = []
     for rec in records:
-        if not rec.get("key", {}).get("fromMe"):
+        if not rec or not isinstance(rec, dict):
             continue
-        m = rec.get("message", {})
-        text = (
-            m.get("conversation", "")
-            or m.get("extendedTextMessage", {}).get("text", "")
-        )
+        key = rec.get("key")
+        if not key or not isinstance(key, dict):
+            continue
+        if not key.get("fromMe"):
+            continue
+        m = rec.get("message")
+        if not m or not isinstance(m, dict):
+            continue
+        
+        # Extract text safely
+        text = ""
+        conversation = m.get("conversation")
+        if isinstance(conversation, str):
+            text = conversation
+        else:
+            ext_msg = m.get("extendedTextMessage")
+            if isinstance(ext_msg, dict):
+                ext_text = ext_msg.get("text")
+                if isinstance(ext_text, str):
+                    text = ext_text
+                    
+        if not text:
+            continue
+            
         found = PROTOCOL_RE.findall(text)
         protos.extend(f"P-{p.upper()}" for p in found)
     return list(dict.fromkeys(protos))  # deduplica mantendo ordem
@@ -98,7 +126,13 @@ def extract_protocols_from_records(records: list[dict]) -> list[str]:
 
 def has_inbound_response(records: list[dict]) -> bool:
     """Retorna True se há pelo menos uma mensagem inbound (pai respondeu)."""
-    return any(not rec.get("key", {}).get("fromMe") for rec in records)
+    for rec in records:
+        if not rec or not isinstance(rec, dict):
+            continue
+        key = rec.get("key")
+        if isinstance(key, dict) and not key.get("fromMe"):
+            return True
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -130,18 +164,19 @@ def get_campaign_protocol_map(repo, campaign_id: str) -> dict:
             .execute().data or [])
 
     students = {s["id"]: s["name"] for s in
-                repo.client.schema("busca_ativa_v2").table("students").select("id,name").execute().data or []}
+                repo.client.schema("busca_ativa_v2").table("students").select("id,name").execute().data or []
+                if isinstance(s, dict) and "id" in s and "name" in s}
 
     proto_map = {}
     for m in msgs:
-        if not m.get("tracking_ref"):
+        if not m or not isinstance(m, dict) or not m.get("tracking_ref"):
             continue
         proto = f"P-{_short_protocol(m['tracking_ref'])}"
         proto_map[proto] = {
             "wa_jid": m.get("wa_jid"),
             "guardian_id": m.get("guardian_id"),
             "school_id": m.get("school_id"),
-            "student_name": students.get(m.get("student_id"), "?"),
+            "student_name": students.get(m.get("student_id"), "?") if m.get("student_id") else "?",
             "status": m.get("status"),
         }
     return proto_map
