@@ -116,6 +116,32 @@ class MessageCatalog:
             absence_days=(absence_days or "dias nao informados").strip(),
         )
 
+    def get_message(
+        self,
+        template_id: str,
+        parent_name: str,
+        student_name: str,
+        class_name: str,
+        absence_days: str = "dias recentes",
+    ) -> str:
+        for tpl in MESSAGE_TEMPLATES:
+            if tpl.template_id == template_id:
+                return tpl.text.format(
+                    parent_name=(parent_name or "Responsável").strip(),
+                    school_name=self.school_name,
+                    student_name=(student_name or "Aluno(a)").strip(),
+                    class_name=self._normalize_class_name_short(class_name),
+                    absence_days=(absence_days or "dias recentes").strip(),
+                )
+        tpl = MESSAGE_TEMPLATES[0]
+        return tpl.text.format(
+            parent_name=(parent_name or "Responsável").strip(),
+            school_name=self.school_name,
+            student_name=(student_name or "Aluno(a)").strip(),
+            class_name=self._normalize_class_name_short(class_name),
+            absence_days=(absence_days or "dias recentes").strip(),
+        )
+
     def _choose_template(self, *, campaign_id: str, unique_key: str) -> MessageTemplate:
         digest = hashlib.sha256(f"{campaign_id}|{unique_key}".encode("utf-8")).hexdigest()
         return MESSAGE_TEMPLATES[int(digest[:8], 16) % len(MESSAGE_TEMPLATES)]

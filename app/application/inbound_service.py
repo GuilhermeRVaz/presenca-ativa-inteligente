@@ -748,10 +748,34 @@ class InboundService:
     ) -> bool:
         """
         Dispara webhook para o n8n para tratar a interação de chat conversacional.
+        Enriquece o payload com a última mensagem outbound enviada e contexto da campanha.
         """
         if not settings.n8n_chat_webhook_url:
             logger.warning("n8n_chat_webhook_url_not_configured")
             return False
+
+        last_outbound_text = None
+        campaign_name = None
+        campaign_base_message = None
+
+        try:
+            res_msg = (
+                self.repository.client.schema("busca_ativa_v2")
+                .table("messages")
+                .select("body_preview, metadata, campaigns(name, base_message)")
+                .eq("wa_jid", sender_jid)
+                .order("created_at", desc=True)
+                .limit(1)
+                .execute()
+            )
+            if res_msg.data:
+                row = res_msg.data[0]
+                last_outbound_text = row.get("body_preview") or (row.get("metadata") or {}).get("formatted_body")
+                camp_data = row.get("campaigns") or {}
+                campaign_name = camp_data.get("name")
+                campaign_base_message = camp_data.get("base_message")
+        except Exception as exc:
+            logger.warning("failed_to_fetch_last_outbound_context", error=str(exc))
 
         payload = {
             "school_id": school_id,
@@ -761,6 +785,9 @@ class InboundService:
             "message_text": text or "",
             "received_at": received_at,
             "push_name": push_name,
+            "last_outbound_text": last_outbound_text,
+            "campaign_name": campaign_name,
+            "campaign_base_message": campaign_base_message,
         }
 
         try:
