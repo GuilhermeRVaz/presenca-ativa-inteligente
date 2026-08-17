@@ -192,15 +192,15 @@ def _capture_lid_after_send(
         if not lid_jid:
             return
 
-        existing = (
-            client.schema("busca_ativa_v2")
+        existing = _execute_with_retry(
+            lambda: client.schema("busca_ativa_v2")
             .table("phone_identity_map")
             .select("id")
             .eq("lid_jid", lid_jid)
-            .limit(1)
-            .execute()
+            .limit(1),
+            label="buscar lid_jid",
         )
-        if existing.data:
+        if existing and existing.data:
             return
 
         from app.infrastructure.supabase.repositories import SupabaseRepository
@@ -294,6 +294,7 @@ async def run_orchestrator(
     client = _build_supabase_client()
     gateway = EvolutionGateway()
     catalog = MessageCatalog(school_name=settings.school_name)
+    followup_catalog = FollowupMessageCatalog(school_name=settings.school_name)
 
     # 1. Resolver campanha
     if not campaign_id:
@@ -383,19 +384,22 @@ async def run_orchestrator(
     for idx, msg in enumerate(messages, 1):
         # ── VERIFICAÇÃO EM TEMPO REAL: Kill Switch Global ou Status 'paused' / 'cancelled' ──
         if not dry_run:
-            check_camp = (
-                client.schema("busca_ativa_v2")
-                .table("campaigns")
-                .select("status")
-                .eq("id", campaign_id)
-                .single()
-                .execute()
-            )
-            camp_status = check_camp.data.get("status") if check_camp.data else ""
-            if camp_status in ["paused", "cancelled"]:
-                _log_event(client, campaign_id, "interrupcao_emergencia", f"Kill Switch/Pausa acionado! Status '{camp_status}'.", dry_run=dry_run)
-                print(f"\n{Colors.RED}[KILL SWITCH DETECTADO]{Colors.RESET} Status '{camp_status}'. Abortando orquestrador de forma segura.")
-                break
+            try:
+                check_camp = _execute_with_retry(
+                    lambda: client.schema("busca_ativa_v2")
+                    .table("campaigns")
+                    .select("status")
+                    .eq("id", campaign_id)
+                    .single(),
+                    label="verificar kill switch",
+                )
+                camp_status = check_camp.data.get("status") if check_camp and check_camp.data else ""
+                if camp_status in ["paused", "cancelled"]:
+                    _log_event(client, campaign_id, "interrupcao_emergencia", f"Kill Switch/Pausa acionado! Status '{camp_status}'.", dry_run=dry_run)
+                    print(f"\n{Colors.RED}[KILL SWITCH DETECTADO]{Colors.RESET} Status '{camp_status}'. Abortando orquestrador de forma segura.")
+                    break
+            except Exception as exc:
+                print(f"{Colors.YELLOW}[AVISO KILL SWITCH]{Colors.RESET} Oscilação de rede ao checar status da campanha: {exc}. Continuando...")
 
         # ── HORÁRIO INTELIGENTE & RESTRIÇÃO DE DIAS ──
         if not dry_run:
@@ -483,21 +487,59 @@ async def run_orchestrator(
             or meta.get("skip_justification_suffix") is True
         )
 
+        is_followup = (
+            campaign_type == "followup"
+            or meta.get("is_followup") is True
+            or "follow" in campaign_name.lower()
+            or "retorno" in campaign_name.lower()
+        )
+
         absence_days = meta.get("data_falta") or campaign_data.get("absence_days") or "dias recentes"
 
-        if is_extraordinary:
+        if meta.get("custom_message"):
+            final_text = meta.get("custom_message")
+        elif is_extraordinary:
             final_text = meta.get("formatted_body") or body_preview
         elif campaign_type == "obmep":
             final_text = body_preview or catalog.get_message(template_id, guardian_name, student_name, class_name, absence_days)
+        elif is_followup:
+            protocol = _short_protocol(tracking_ref)
+            rodape = (
+                f"Código do aluno: P-{protocol}\n"
+                f"Para justificar, responda copiando o código acima ou escreva o nome do aluno com o motivo."
+            )
+            if body_preview and f"P-{protocol}" in body_preview:
+                final_text = body_preview
+            else:
+                _, base_msg_text = followup_catalog.build_message(
+                    parent_name=guardian_name,
+                    student_name=student_name,
+                    class_name=class_name,
+                    absence_days=absence_days,
+                    campaign_id=campaign_id,
+                    unique_key=wa_jid or msg_id,
+                    campaign_name=campaign_name,
+                )
+                final_text = f"{base_msg_text}\n\n{rodape}"
         else:
             protocol = _short_protocol(tracking_ref)
             rodape = (
                 f"Código do aluno: P-{protocol}\n"
                 f"Para justificar, responda copiando o código acima ou escreva o nome do aluno com o motivo."
             )
-            # ── Anti-duplicação: verifica se o body_preview já tem o rodapé ──
-            # Isso evita triplicar o rodapé quando a mensagem foi salva em execuções anteriores
-            base_msg_text = catalog.get_message(template_id, guardian_name, student_name, class_name, absence_days)
+            from app.infrastructure.message_catalog import MESSAGE_TEMPLATES
+            known_template_ids = {t.template_id for t in MESSAGE_TEMPLATES}
+            if template_id and template_id in known_template_ids:
+                base_msg_text = catalog.get_message(template_id, guardian_name, student_name, class_name, absence_days)
+            else:
+                _, base_msg_text = catalog.build_message(
+                    parent_name=guardian_name,
+                    student_name=student_name,
+                    class_name=class_name,
+                    absence_days=absence_days,
+                    campaign_id=campaign_id,
+                    unique_key=wa_jid or msg_id,
+                )
             final_text = f"{base_msg_text}\n\n{rodape}"
 
         msg_hash = _compute_message_hash(final_text)

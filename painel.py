@@ -378,7 +378,7 @@ with tab1:
                 st.warning("Preencha a mensagem base!")
             else:
                 with st.spinner("Gerando 20 variações parafraseadas via OpenAI..."):
-                    variants = ai_service.generate_variants(base_message=base_message, count=20)
+                    variants = ai_service.generate_variants(base_message=base_message, num_variants=20)
                     st.session_state["ai_variants"] = variants
                     st.success(f"🎉 {len(variants)} variações geradas com sucesso!")
 
@@ -418,11 +418,12 @@ with tab1:
                         ai_variants=variants_list or [base_message]
                     )
                     if created:
-                        msg_count = camp_service.enqueue_campaign_messages(
+                        enq_result = camp_service.enqueue_campaign_messages(
                             campaign_id=created["id"],
                             target_filter=target_filter,
                             ai_variants=variants_list or [base_message]
                         )
+                        msg_count = enq_result.get("total_enqueued", 0) if isinstance(enq_result, dict) else enq_result
                         st.success(f"✅ Campanha '{camp_title}' criada com {msg_count} mensagens enfileiradas!")
                         st.session_state["active_campaign_id"] = created["id"]
                         st.rerun()

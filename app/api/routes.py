@@ -11,7 +11,15 @@ from app.api.schemas import (
     ConsolidatedCampaignReport,
     AIInteractionRequest,
     AIInteractionResponse,
+    StaffAlertRequest,
+    StaffAlertResponse,
+    ClassificationRequest,
+    ClassificationResponse,
+    GenerateReplyRequest,
+    GenerateReplyResponse,
 )
+
+
 from app.application.analytics.campaign_analytics import CampaignAnalytics
 from app.application.analytics.report_exporter import ReportExporter
 from app.application.inbound_service import InboundService
@@ -64,8 +72,8 @@ def build_repository() -> SupabaseRepository:
 
 
 def build_repository_internal() -> SupabaseRepository:
-    """Repositório para endpoints internos chamados pelo n8n (mais tolerante a latência)."""
-    return SupabaseRepository(timeout=10.0, attempts=3)
+    """Repositório para endpoints internos chamados pelo n8n (protegido para rede seduc-ADM)."""
+    return SupabaseRepository(timeout=2.0, attempts=1)
 
 
 @router.get("/health")
@@ -310,25 +318,32 @@ def inbound_reply(payload: InboundReplyRequest) -> InboundReplyResponse:
     else:
         identity_conf = "HIGH" if guardian_id else "UNRESOLVED"
         
+    import concurrent.futures
     try:
-        response_id, marked = repository.save_reply(
-            school_id=school_id,
-            raw_message_id=payload.raw_message_id,
-            sender_jid=payload.sender_jid,
-            body=payload.body,
-            identity_confidence=identity_conf,
-            message_id=message_id,
-            guardian_id=guardian_id,
-            campaign_id=campaign_id,
-            student_id=student_id,
-            reason=normalized_reason if payload.reason else None,
-            ai_confidence=payload.ai_confidence or 0.0,
-            received_at=payload.received_at,
-            needs_review=payload.needs_review,
-            handoff_reason=payload.handoff_reason,
-            detected_intent=payload.detected_intent,
-            risk_level=payload.risk_level,
-        )
+        def _do_save():
+            return repository.save_reply(
+                school_id=school_id,
+                raw_message_id=payload.raw_message_id,
+                sender_jid=payload.sender_jid,
+                body=payload.body,
+                identity_confidence=identity_conf,
+                message_id=message_id,
+                guardian_id=guardian_id,
+                campaign_id=campaign_id,
+                student_id=student_id,
+                reason=normalized_reason if payload.reason else None,
+                ai_confidence=payload.ai_confidence or 0.0,
+                received_at=payload.received_at,
+                needs_review=payload.needs_review,
+                handoff_reason=payload.handoff_reason,
+                detected_intent=payload.detected_intent,
+                risk_level=payload.risk_level,
+            )
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(_do_save)
+            response_id, marked = future.result(timeout=3.5)
+
         logger.info(
             "inbound_reply_saved",
             response_id=response_id,
@@ -474,6 +489,123 @@ def save_ai_interaction_endpoint(payload: AIInteractionRequest) -> AIInteraction
         return AIInteractionResponse(ok=True, interaction_id=str(uuid.uuid4()))
 
 
+@router.post(
+    "/inbound/alert_staff",
+    response_model=StaffAlertResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Encaminhar alerta via WhatsApp para membro da equipe escolar (Junior, Paula, Anderson, Lucimara)",
+)
+def alert_staff_endpoint(payload: StaffAlertRequest) -> StaffAlertResponse:
+    repository = build_repository_internal()
+    service = InboundService(repository=repository)
+    try:
+        res = service.send_staff_alert(
+            target_role=payload.target_role,
+            student_name=payload.student_name,
+            student_class=payload.student_class,
+            guardian_name=payload.guardian_name,
+            guardian_phone=payload.guardian_phone,
+            alert_reason=payload.alert_reason,
+            message_summary=payload.message_summary,
+            unanswered_question=payload.unanswered_question,
+            school_id=payload.school_id,
+        )
+        return StaffAlertResponse(
+            ok=True,
+            sent=res["sent"],
+            recipient_role=res["recipient_role"],
+            recipient_phone=res["recipient_phone"],
+            provider_message_id=res.get("provider_message_id"),
+            error=res.get("error"),
+        )
+    except Exception as exc:
+        return StaffAlertResponse(
+            ok=False,
+            sent=False,
+            recipient_role=payload.target_role,
+            recipient_phone="",
+            error=str(exc),
+        )
+
+
+@router.post(
+    "/inbound/classify",
+    response_model=ClassificationResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Classificar intenção e risco da mensagem (chamado pelo n8n)",
+)
+def classify_endpoint(payload: ClassificationRequest) -> ClassificationResponse:
+    repository = build_repository_internal()
+    service = InboundService(repository=repository)
+    res = service.classify_inbound_message(
+        school_id=payload.school_id,
+        sender_jid=payload.sender_jid,
+        message_text=payload.message_text,
+        student_name=payload.student_name,
+        last_reason=payload.last_reason,
+        campaign_name=payload.campaign_name,
+        messages_history=payload.messages_history,
+    )
+    return ClassificationResponse(
+        intent=res["intent"],
+        category=res.get("category"),
+        risk_level=res.get("risk_level", "LOW"),
+        needs_human=res.get("needs_human", False),
+        confidence=res.get("confidence", 1.0),
+        needs_review=res.get("needs_review", False),
+        handoff_reason=res.get("handoff_reason"),
+    )
+
+
+@router.post(
+    "/inbound/generate_reply",
+    response_model=GenerateReplyResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Gerar resposta empática de justificativa (chamado pelo n8n)",
+)
+def generate_reply_endpoint(payload: GenerateReplyRequest) -> GenerateReplyResponse:
+    repository = build_repository_internal()
+    service = InboundService(repository=repository)
+    text = service.generate_emphetic_reply(
+        student_name=payload.student_name,
+        category=payload.category,
+        push_name=payload.push_name,
+        message_text=payload.message_text,
+    )
+    return GenerateReplyResponse(
+        response_text=text,
+        model="local_resilient",
+        prompt_version="v2",
+        detected_intent="JUSTIFICATIVA_FALTA",
+        risk_level="LOW",
+    )
+
+
+@router.post(
+    "/inbound/generate_sac_reply",
+    response_model=GenerateReplyResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Gerar resposta SAC de dúvida da secretaria (chamado pelo n8n)",
+)
+def generate_sac_reply_endpoint(payload: GenerateReplyRequest) -> GenerateReplyResponse:
+    repository = build_repository_internal()
+    service = InboundService(repository=repository)
+    text = service.generate_sac_reply(
+        message_text=payload.message_text,
+        rag_context=payload.rag_context,
+    )
+    return GenerateReplyResponse(
+        response_text=text,
+        model="local_resilient",
+        prompt_version="v2",
+        detected_intent="DUVIDA_SECRETARIA",
+        risk_level="LOW",
+    )
+
+
+
+
+
 @router.get(
     "/students/session_context",
     summary="Obter contexto conversacional leve para o n8n/chat",
@@ -483,9 +615,10 @@ def get_session_context_endpoint(
     school_id: str | None = None,
     limit: int = 5,
     student_id: str | None = None,
+    last_outbound_text: str | None = None,
+    message_text: str | None = None,
 ):
     if not sender_jid:
-        logger.warning("get_session_context_missing_sender_jid_returning_fallback")
         return {
             "student_name": None,
             "last_reason": None,
@@ -496,35 +629,45 @@ def get_session_context_endpoint(
             "messages": []
         }
 
-    repository = build_repository_internal()
-    school_id = school_id or settings.default_school_id
+    # 1. Extração instantânea (<1ms) do nome do aluno a partir de last_outbound_text
+    import re
+    extracted_name = None
+    if last_outbound_text:
+        match = re.search(r"(?:informa\s+que|ausencias?\s+de|ausencia\s+de|aluno\(a\))\s+([A-ZÀ-Ú\s]{5,60}?)(?:\s+no\s+dia|,\s*da\s+turma|\s+faltou|\s+esteve)", last_outbound_text, re.IGNORECASE)
+        if match:
+            candidate = match.group(1).strip().upper()
+            if len(candidate) >= 3 and candidate.lower() not in ("aluno", "uma", "o"):
+                extracted_name = candidate
 
-    if not school_id:
-        raise HTTPException(status_code=400, detail="school_id não configurado")
+    # Tenta extrair pelo código do aluno P-XXXXXX se last_outbound_text/message_text contiver o código
+    if not extracted_name and (message_text or last_outbound_text):
+        code_match = re.search(r"P-[0-9A-Z]{6}", f"{message_text or ''} {last_outbound_text or ''}", re.IGNORECASE)
+        if code_match:
+            found_code = code_match.group(0).upper()
+            try:
+                repository = build_repository_internal()
+                school_id = school_id or settings.default_school_id
+                stu_res = repository.client.schema("busca_ativa_v2").table("students").select("name").eq("school_id", school_id).ilike("code", found_code).limit(1).execute()
+                if stu_res.data:
+                    extracted_name = stu_res.data[0].get("name")
+            except Exception:
+                pass
 
-    from app.infrastructure.supabase.repositories import SupabaseRepository
-    if school_id == "school-1" and isinstance(repository, SupabaseRepository):
+    if extracted_name:
+        logger.info("get_session_context_instant_regex_success", student_name=extracted_name)
         return {
-            "student_name": "João da Silva",
-            "last_reason": "ILLNESS",
+            "student_name": extracted_name,
+            "last_reason": None,
             "status": "active",
-            "campaign_id": "campaign-1",
-            "campaign_name": "Campanha Teste",
-            "campaign_absence_days": 1,
-            "messages": [
-                {"text": "ele está doente", "sender": "guardian", "timestamp": "2026-05-22T12:00:00Z"}
-            ]
+            "campaign_id": None,
+            "campaign_name": None,
+            "campaign_absence_days": None,
+            "messages": []
         }
 
-    import uuid
-    if school_id != "school-1":
-        try:
-            uuid.UUID(str(school_id))
-        except ValueError:
-            raise HTTPException(
-                status_code=400,
-                detail=f"school_id inválido (deve ser um UUID válido): {school_id}"
-            )
+    # 2. Se não encontrou por texto, tenta consulta no Supabase Cloud
+    repository = build_repository_internal()
+    school_id = school_id or settings.default_school_id
 
     try:
         context = repository.get_conversation_context(
@@ -533,14 +676,18 @@ def get_session_context_endpoint(
             limit=limit,
             student_id=student_id,
         )
-        logger.info(
-            "get_session_context_success",
-            sender_jid=sender_jid,
-            student_name=context.get("student_name"),
-            last_reason=context.get("last_reason"),
-            status=context.get("status"),
-        )
         return context
+    except Exception as exc:
+        logger.warning("get_session_context_db_failed_returning_fallback", error=str(exc))
+        return {
+            "student_name": None,
+            "last_reason": None,
+            "status": "active",
+            "campaign_id": None,
+            "campaign_name": None,
+            "campaign_absence_days": None,
+            "messages": []
+        }
     except Exception as exc:
         logger.warning(
             "get_session_context_failed_returning_fallback",

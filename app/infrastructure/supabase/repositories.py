@@ -991,6 +991,59 @@ class SupabaseRepository:
                     student_id = r.get("student_id")
                     break
 
+        # Fallback: Extract student_id and campaign_id from messages table by wa_jid if not found in session/responses
+        if not student_id or not campaign_id:
+            try:
+                for jid_cand in wa_jids:
+                    msg_res = (
+                        self.client.schema("busca_ativa_v2")
+                        .table("messages")
+                        .select("student_id, campaign_id, guardian_id")
+                        .eq("school_id", school_id)
+                        .eq("wa_jid", jid_cand)
+                        .order("created_at", desc=True)
+                        .limit(1)
+                        .execute()
+                    )
+                    if msg_res.data:
+                        m_row = msg_res.data[0]
+                        if not student_id and m_row.get("student_id"):
+                            student_id = m_row.get("student_id")
+                        if not campaign_id and m_row.get("campaign_id"):
+                            campaign_id = m_row.get("campaign_id")
+                        if not guardian_id and m_row.get("guardian_id"):
+                            guardian_id = m_row.get("guardian_id")
+                        if student_id:
+                            break
+            except Exception as msg_exc:
+                logger.warning("get_messages_context_fallback_failed", error=str(msg_exc))
+
+        # Fallback: Extract student_id by code pattern P-XXXXXX if still missing
+        if not student_id:
+            import re
+            for r in responses_data:
+                body_txt = r.get("body") or ""
+                code_match = re.search(r"P-[0-9A-Z]{6}", body_txt, re.IGNORECASE)
+                if code_match:
+                    found_code = code_match.group(0).upper()
+                    try:
+                        stu_res = (
+                            self.client.schema("busca_ativa_v2")
+                            .table("students")
+                            .select("id, name")
+                            .eq("school_id", school_id)
+                            .ilike("code", found_code)
+                            .limit(1)
+                            .execute()
+                        )
+                        if stu_res.data:
+                            student_id = stu_res.data[0].get("id")
+                            break
+                    except Exception:
+                        pass
+
+
+
         # Extract last_reason by JID (fallback)
         last_reason_by_jid = None
         for r in responses_data:
@@ -1010,6 +1063,9 @@ class SupabaseRepository:
         # Batch 2: Get name, campaign details, outbounds, and last reason by student_id in parallel
         campaign_name = None
         campaign_absence_days = None
+        campaign_faq = None
+        campaign_base_message = None
+        campaign_obj = None
 
         def safe_get_campaign_details():
             if not campaign_id:
@@ -1018,7 +1074,7 @@ class SupabaseRepository:
                 return (
                     self.client.schema("busca_ativa_v2")
                     .table("campaigns")
-                    .select("name, absence_days")
+                    .select("id, name, type, campaign_type, category, base_message, target_filter, absence_days")
                     .eq("school_id", school_id)
                     .eq("id", campaign_id)
                     .limit(1)
@@ -1086,11 +1142,62 @@ class SupabaseRepository:
 
         # Parse Batch 2 results
         if camp_res and camp_res.data:
-            campaign_name = camp_res.data[0].get("name")
-            campaign_absence_days = camp_res.data[0].get("absence_days")
+            c_row = camp_res.data[0]
+            campaign_name = c_row.get("name")
+            campaign_absence_days = c_row.get("absence_days")
+            campaign_base_message = c_row.get("base_message")
+            tf = c_row.get("target_filter") or {}
+            campaign_faq = tf.get("faq")
+            campaign_obj = {
+                "id": c_row.get("id") or campaign_id,
+                "name": campaign_name,
+                "type": c_row.get("campaign_type") or c_row.get("type") or "extraordinary",
+                "category": c_row.get("category"),
+                "base_message": campaign_base_message,
+                "faq": campaign_faq,
+                "target_filter": tf,
+            }
 
         if stu_res and stu_res.data:
             student_name = stu_res.data[0].get("name")
+
+        # Fallback 1: Extrair nome do aluno a partir da mensagem outbound de campanha enviada
+        if not student_name and outbound_res and outbound_res.data:
+            import re
+            for ob in outbound_res.data:
+                txt = ob.get("body_preview") or ""
+                match = re.search(r"(?:informa\s+que|ausencias?\s+de|aluno\(a\))\s+([A-ZÀ-Ú\s]{5,60}?)(?:,\s*da\s+turma|\s+faltou|\s+esteve)", txt, re.IGNORECASE)
+                if match:
+                    extracted_name = match.group(1).strip()
+                    if len(extracted_name) >= 3 and extracted_name.lower() not in ("aluno", "uma", "o"):
+                        student_name = extracted_name.upper()
+                        logger.info("get_conversation_context_extracted_student_name_from_outbound", student_name=student_name)
+                        break
+
+        # Fallback 2: Tentar extrair do texto digitado pela mãe se contiver um nome completo de aluno no banco
+        if not student_name and responses_data:
+            for r in responses_data:
+                body_txt = r.get("body") or ""
+                words = [w for w in body_txt.split() if len(w) >= 3 and w.isalpha()]
+                if len(words) >= 2:
+                    potential_name = " ".join(words[:4])
+                    try:
+                        search_res = (
+                            self.client.schema("busca_ativa_v2")
+                            .table("students")
+                            .select("name, id")
+                            .eq("school_id", school_id)
+                            .ilike("name", f"%{words[0]}%{words[1]}%")
+                            .limit(1)
+                            .execute()
+                        )
+                        if search_res.data:
+                            student_name = search_res.data[0].get("name")
+                            student_id = student_id or search_res.data[0].get("id")
+                            logger.info("get_conversation_context_matched_student_name_from_inbound", student_name=student_name)
+                            break
+                    except Exception:
+                        pass
 
         if reason_res and reason_res.data:
             last_reason = reason_res.data[0].get("reason")
@@ -1124,6 +1231,9 @@ class SupabaseRepository:
             "campaign_id": campaign_id,
             "campaign_name": campaign_name,
             "campaign_absence_days": campaign_absence_days,
+            "campaign_base_message": campaign_base_message,
+            "campaign_faq": campaign_faq,
+            "campaign": campaign_obj,
             "messages": last_msgs,
         }
 
@@ -1247,18 +1357,26 @@ class SupabaseRepository:
             rows = res.data or []
             
             # Simple keyword matching and scoring
+            high_priority_terms = {"quarta", "reuniao", "horario", "local", "data", "tolerancia", "filhos", "atestado", "padrasto", "marido", "declaracao"}
             scored_rows = []
             for row in rows:
                 q_text = normalize_txt(str(row.get("question") or ""))
                 a_text = normalize_txt(str(row.get("answer") or ""))
+                cat = str(row.get("category") or "").upper()
                 
-                # Count matching terms
                 score = 0
                 for term in terms:
                     if term in q_text:
-                        score += 3  # Higher weight for questions
+                        score += 5
+                        if term in high_priority_terms:
+                            score += 10
                     if term in a_text:
-                        score += 1  # Lower weight for answers
+                        score += 2
+                        if term in high_priority_terms:
+                            score += 5
+                
+                if cat in ["LOGISTICA", "PEDAGOGICO", "ATENDIMENTO", "REGRAS", "COMUNIDADE"]:
+                    score += 3
                 
                 if score > 0:
                     scored_rows.append((score, row))

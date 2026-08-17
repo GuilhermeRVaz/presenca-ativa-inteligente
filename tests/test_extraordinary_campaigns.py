@@ -44,6 +44,10 @@ def test_campaign_ai_service_generate_variants_mock():
         assert all("{{nome_responsavel}}" in v for v in variants)
         assert all("{{nome_aluno}}" in v for v in variants)
 
+        # Test count alias parameter
+        variants_count = svc.generate_variants(base_msg, count=20)
+        assert len(variants_count) == 20
+
 
 def test_extraordinary_campaign_service_available_classes():
     mock_repo = MagicMock()

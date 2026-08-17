@@ -29,6 +29,11 @@ sys.path.insert(0, str(ROOT))
 
 from app.core.config import settings
 from app.core.logging import logger
+from app.infrastructure.followup_message_catalog import FollowupMessageCatalog
+
+def _short_protocol(tracking_ref: str) -> str:
+    digest = hashlib.sha256(tracking_ref.encode("utf-8")).hexdigest()
+    return digest[:6].upper()
 
 # ─── Constantes ──────────────────────────────────────────────────────────────
 SUCCESS_STATUSES = {"sent", "delivered", "read"}
@@ -293,7 +298,7 @@ def main():
                     "campaign_type": "followup",
                     "parent_campaign_id": parent_campaign_ids[0],
                     "absence_days": absence_days,
-                    "status": "draft",
+                    "status": "pending",
                     "total_sent": 0,
                     "total_replied": 0,
                 })
@@ -337,6 +342,25 @@ def main():
         tracking_ref = f"FOL{followup_campaign_id[:8]}-STU{stu_id[:8]}"
         print(f" [{idx}/{len(students_with_secondary)}] [FILA] {student_name} | Responsável {guardian_name} ({guardian['phone_e164']}) -> Fila")
 
+        # Gerar variação de mensagem do catálogo de follow-up
+        fup_catalog = FollowupMessageCatalog(school_name=settings.school_name)
+        fup_template_id, fup_base_text = fup_catalog.build_message(
+            parent_name=guardian_name,
+            student_name=student_name,
+            class_name=orig_msg.get("metadata", {}).get("turma", ""),
+            absence_days=orig_msg.get("metadata", {}).get("data_falta", ""),
+            campaign_id=followup_campaign_id,
+            unique_key=wa_jid or stu_id,
+            campaign_name=followup_campaign_name,
+        )
+
+        protocol_code = _short_protocol(tracking_ref)
+        rodape = (
+            f"Código do aluno: P-{protocol_code}\n"
+            f"Para justificar, responda copiando o código acima ou escreva o nome do aluno com o motivo."
+        )
+        full_fup_text = f"{fup_base_text}\n\n{rodape}"
+
         # Dados da mensagem
         meta = {
             "nome_excel": student_name,
@@ -354,7 +378,8 @@ def main():
             "guardian_id": guardian_id,
             "tracking_ref": tracking_ref,
             "wa_jid": wa_jid,
-            "template_id": "busca_ativa_v1_followup",
+            "template_id": fup_template_id,
+            "body_preview": full_fup_text,
             "status": "pending",
             "origin_message_id": orig_msg["id"],
             "metadata": meta,

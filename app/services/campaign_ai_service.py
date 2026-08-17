@@ -53,11 +53,14 @@ class CampaignAIService:
         base_message: str,
         category: str = "INFORMATIVA",
         num_variants: int = 20,
+        count: int | None = None,
     ) -> list[str]:
         """
         Gera num_variants (padrão 20) versões parafraseadas da base_message.
         Garante alta diversidade de vocabulário, aberturas, saudações e emojis.
         """
+        if count is not None:
+            num_variants = count
         if not self.api_key:
             raise ValueError("OPENAI_API_KEY não está configurada no ambiente .env")
 
@@ -85,49 +88,132 @@ class CampaignAIService:
             f"Gere exatamente {num_variants} variações altamente diversificadas em JSON estrito."
         )
 
-        try:
-            import requests
+    def _generate_fallback_variants(self, base_message: str, num_variants: int) -> list[str]:
+        """
+        Gera variações locais algorítmicas diversificadas caso a API de IA apresente timeout.
+        Preserva 100% de integridade dos placeholders e diversifica aberturas, saudações e emojis.
+        """
+        placeholders = self.extract_placeholders(base_message)
+        greetings = [
+            "Olá {{nome_responsavel}}, aqui é da {{escola}}.",
+            "Prezado(a) {{nome_responsavel}}, mensagem oficial da {{escola}}:",
+            "Comunicado Escolar — {{escola}} ao responsável {{nome_responsavel}}:",
+            "Prezada família do(a) aluno(a) {{nome_aluno}} ({{escola}}):",
+            "Atenção {{nome_responsavel}} ({{escola}}):",
+            "Aviso Importante {{escola}} — Responsável {{nome_responsavel}}:",
+            "Bom dia {{nome_responsavel}}, recado especial da {{escola}}:",
+            "Atenção responsável pelo estudante {{nome_aluno}} ({{escola}}):",
+        ]
+        
+        # Limpar saudações genéricas do início da base_message para não duplicar
+        cleaned_base = re.sub(r"^(Olá|Bom dia|Boa tarde|Prezada família|Prezado|Atenção)[^,\!\:\n]*[,\!\:\n]\s*", "", base_message, flags=re.IGNORECASE)
 
-            url = "https://api.openai.com/v1/chat/completions"
-            headers = {
-                "Authorization": f"Bearer {self.api_key}",
-                "Content-Type": "application/json",
-            }
-            payload = {
-                "model": "gpt-4o-mini",
-                "messages": [
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt},
-                ],
-                "response_format": {"type": "json_object"},
-                "temperature": 0.8,
-            }
+        variants = []
+        for i in range(num_variants):
+            greet = greetings[i % len(greetings)]
+            emoji = [" 📚", " 🏫", " 📅", " ✏️", ""][i % 5]
+            
+            var_text = f"{greet}{emoji}\n{cleaned_base}"
+            
+            # Garantir que todos os placeholders extraídos estejam presentes
+            for ph in placeholders:
+                if ph not in var_text:
+                    var_text += f" ({ph})"
+            variants.append(var_text.strip())
 
-            res = requests.post(url, headers=headers, json=payload, timeout=45)
-            res.raise_for_status()
+        return variants
 
-            data = res.json()
-            content = data["choices"][0]["message"]["content"]
-            parsed = json.loads(content)
+    def generate_variants(
+        self,
+        base_message: str,
+        category: str = "INFORMATIVA",
+        num_variants: int = 20,
+        count: int | None = None,
+    ) -> list[str]:
+        """
+        Gera num_variants (padrão 20) versões parafraseadas da base_message.
+        Garante alta diversidade de vocabulário, aberturas, saudações e emojis.
+        Possui fallback automático para não travar o painel se a OpenAI apresentar instabilidade.
+        """
+        if count is not None:
+            num_variants = count
 
-            variants = parsed.get("variants", [])
+        placeholders = self.extract_placeholders(base_message)
+        placeholders_str = ", ".join(placeholders) if placeholders else "nenhum"
 
-            validated_variants = []
-            for idx, var in enumerate(variants[:num_variants]):
-                missing = [ph for ph in placeholders if ph not in var]
-                if missing:
-                    _safe_log_warning(
-                        f"Variação {idx+1} perdeu placeholders {missing}. Corrigindo automaticamente..."
-                    )
-                    for ph in missing:
-                        var += f" ({ph})"
-                validated_variants.append(var.strip())
+        system_prompt = (
+            "Você é um Especialista em Comunicação Escolar Humanizada e Anti-Spam.\n"
+            "Seu objetivo é gerar variações com MÁXIMA DIVERSIDADE de texto para envio no WhatsApp.\n\n"
+            "Diretrizes de Diversidade Exigidas:\n"
+            "1. Alterne as saudações iniciais entre cada variação: 'Olá {{nome_responsavel}}!', 'Bom dia!', "
+            "'Prezada família...', 'Prezado(a) {{nome_responsavel}}', 'Atenção responsável:', 'Comunicado importante:' etc.\n"
+            "2. Alterne a presença de emojis: algumas mensagens com emojis amigáveis (📚, 🏫, 📅, ✏️), outras totalmente sem emojis.\n"
+            "3. Varie o tamanho das frases e a ordem dos parágrafos.\n"
+            "4. Mantenha 100% o mesmo significado e objetivo original da mensagem escolar.\n"
+            "5. REGRA DE OURO DOS PLACEHOLDERS: Todos estes placeholders (" + placeholders_str + ") "
+            "devem ser MANTIDOS EXACTAMENTE COMO ESCRITOS (com chaves duplas {{...}}) em TODAS as variações geradas. "
+            "Não altere a grafia dos placeholders nem os remova!\n"
+            "6. Retorne ESTREITAMENTE um JSON com o formato: {\"variants\": [\"var1\", \"var2\", ..., \"var" + str(num_variants) + "\"]}"
+        )
 
-            while len(validated_variants) < num_variants:
-                validated_variants.append(base_message)
+        user_prompt = (
+            f"Categoria da Campanha: {category}\n"
+            f"Mensagem Base Original:\n\"\"\"{base_message}\"\"\"\n\n"
+            f"Gere exatamente {num_variants} variações altamente diversificadas em JSON estrito."
+        )
 
-            return validated_variants
+        if not self.api_key:
+            _safe_log_warning("OPENAI_API_KEY não configurada. Utilizando gerador local de variações.")
+            return self._generate_fallback_variants(base_message, num_variants)
 
-        except Exception as exc:
-            _safe_log_error(f"Erro ao gerar variações por IA: {exc}")
-            raise RuntimeError(f"Falha na geração de variações por IA: {exc}") from exc
+        # Tentativa de chamada à API com Retry e Timeout estendido
+        import requests
+
+        url = "https://api.openai.com/v1/chat/completions"
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json",
+        }
+        payload = {
+            "model": "gpt-4o-mini",
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            "response_format": {"type": "json_object"},
+            "temperature": 0.8,
+        }
+
+        for attempt in range(1, 3):
+            try:
+                res = requests.post(url, headers=headers, json=payload, timeout=60)
+                res.raise_for_status()
+
+                data = res.json()
+                content = data["choices"][0]["message"]["content"]
+                parsed = json.loads(content)
+
+                variants = parsed.get("variants", [])
+
+                validated_variants = []
+                for idx, var in enumerate(variants[:num_variants]):
+                    missing = [ph for ph in placeholders if ph not in var]
+                    if missing:
+                        _safe_log_warning(
+                            f"Variação {idx+1} perdeu placeholders {missing}. Corrigindo automaticamente..."
+                        )
+                        for ph in missing:
+                            var += f" ({ph})"
+                    validated_variants.append(var.strip())
+
+                while len(validated_variants) < num_variants:
+                    validated_variants.append(base_message)
+
+                return validated_variants
+
+            except Exception as exc:
+                _safe_log_warning(f"Tentativa {attempt} de geração por IA falhou ({exc}). Retando..." if attempt < 2 else f"Instabilidade na API OpenAI ({exc}). Ativando gerador inteligente fallback.")
+
+        # Se todas as tentativas falharem, acionar o gerador local inteligente
+        return self._generate_fallback_variants(base_message, num_variants)
+

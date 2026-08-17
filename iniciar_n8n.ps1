@@ -15,6 +15,7 @@ Get-Content .env | Where-Object { $_ -match '=' -and $_ -notmatch '^#' } | ForEa
 
 Write-Host "Liberando acesso as variáveis de ambiente no n8n..." -ForegroundColor Cyan
 [Environment]::SetEnvironmentVariable("N8N_BLOCK_ENV_ACCESS_IN_NODE", "false", "Process")
+[Environment]::SetEnvironmentVariable("BACKEND_URL", "http://127.0.0.1:8000", "Process")
 
 Write-Host "Iniciando o n8n..." -ForegroundColor Green
 npx n8n start

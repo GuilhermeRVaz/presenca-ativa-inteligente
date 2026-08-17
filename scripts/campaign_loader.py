@@ -30,6 +30,7 @@ sys.path.insert(0, str(ROOT))
 
 from app.core.config import settings
 from app.core.logging import logger
+from app.infrastructure.message_catalog import MessageCatalog
 
 # ─── Constantes ──────────────────────────────────────────────────────────────
 
@@ -168,19 +169,35 @@ def _resolve_student_uuid(client, school_id: str, ra: str, name: str) -> str | N
 
 def _resolve_primary_guardian(client, student_id: str) -> dict | None:
     """Retorna o responsável principal (is_primary=True) vinculado ao aluno."""
+    all_g = _resolve_all_guardians(client, student_id)
+    return all_g[0] if all_g else None
+
+
+def _resolve_all_guardians(client, student_id: str) -> list[dict]:
+    """Retorna a lista de responsáveis vinculados ao aluno (ordenados por is_primary desc)."""
     operation = lambda: (
         client.schema("busca_ativa_v2")
         .table("student_guardians")
-        .select("guardian_id, guardians(id, name, phone_e164, wa_jid)")
+        .select("is_primary, relationship, guardians(id, name, phone_e164, wa_jid)")
         .eq("student_id", student_id)
-        .eq("is_primary", True)
-        .limit(1)
+        .order("is_primary", desc=True)
         .execute()
     )
-    res = _execute_with_retry(operation, operation="resolve_primary_guardian")
-    if res.data and res.data[0].get("guardians"):
-        return res.data[0]["guardians"]
-    return None
+    res = _execute_with_retry(operation, operation="resolve_all_guardians")
+    guardians = []
+    if res.data:
+        for row in res.data:
+            g = row.get("guardians")
+            if g:
+                guardians.append({
+                    "id": str(g["id"]),
+                    "name": g.get("name") or "Sem nome",
+                    "phone": g.get("phone_e164") or g.get("wa_jid") or "Sem telefone",
+                    "wa_jid": g.get("wa_jid"),
+                    "is_primary": row.get("is_primary", False),
+                    "relationship": row.get("relationship") or ("Principal" if row.get("is_primary") else "Secundário"),
+                })
+    return guardians
 
 
 def _create_campaign(client, school_id: str, day: int, month: int, year: int, total: int, dry_run: bool) -> str:
@@ -281,6 +298,16 @@ def _enqueue_message(
         )
         return str(existing.data[0]["id"])
 
+    catalog = MessageCatalog(school_name=settings.school_name)
+    template_id, body_preview = catalog.build_message(
+        parent_name=metadata.get("guardian_name", ""),
+        student_name=metadata.get("nome_excel", ""),
+        class_name=metadata.get("turma", ""),
+        absence_days=metadata.get("data_falta", ""),
+        campaign_id=campaign_id,
+        unique_key=wa_jid or student_id,
+    )
+
     row = {
         "school_id": school_id,
         "campaign_id": campaign_id,
@@ -288,7 +315,8 @@ def _enqueue_message(
         "guardian_id": guardian_id,
         "tracking_ref": tracking_ref,
         "wa_jid": wa_jid,
-        "template_id": "busca_ativa_v1",
+        "template_id": template_id,
+        "body_preview": body_preview,
         "status": "pending",
         "metadata": metadata,
     }
@@ -394,16 +422,24 @@ def load_campaign(
             stats["nao_encontrados"].append({"ra": ra, "nome": name, "turma": turma})
             continue
 
-        # 4b. Resolver responsável principal
-        guardian = _resolve_primary_guardian(client, student_id)
-        if not guardian:
+        # 4b. Resolver responsáveis (principal e secundário)
+        all_guardians = _resolve_all_guardians(client, student_id)
+        if not all_guardians:
             print(f"  ⚠️  Responsável principal NÃO vinculado — pulando")
             stats["sem_responsavel"] += 1
             stats["nao_encontrados"].append({"ra": ra, "nome": name, "turma": turma, "motivo": "sem_responsavel"})
             continue
 
+        guardian = all_guardians[0]
         guardian_id = str(guardian["id"])
         wa_jid = guardian.get("wa_jid")
+
+        sec_info = "N/A (Nenhum secundário cadastrado)"
+        if len(all_guardians) > 1:
+            g_sec = all_guardians[1]
+            sec_info = f"{g_sec['name']} ({g_sec['relationship']}): {g_sec['phone']}"
+
+        prim_info = f"{guardian['name']} ({guardian['relationship']}): {guardian['phone']}"
 
         # 4c. Metadata a ser gravado (Turma + Data da Falta)
         metadata = {
@@ -412,7 +448,8 @@ def load_campaign(
             "ra": ra,
             "nome_excel": name,
             "guardian_name": guardian.get("name", ""),
-            "guardian_phone": guardian.get("phone_e164", ""),
+            "guardian_phone": guardian.get("phone", ""),
+            "secondary_guardian": sec_info,
         }
 
         # 4d. Enfileirar
@@ -428,7 +465,9 @@ def load_campaign(
         )
         stats["enfileirados"] += 1
         wa_indicator = "✅ JID OK" if wa_jid else "⚠️  Sem JID (wa_jid NULL)"
-        print(f"  ✅ Enfileirado | Responsável: {guardian.get('name')} | {wa_indicator}")
+        print(f"  ✅ Enfileirado | {wa_indicator}")
+        print(f"     📞 Tel 1 (Principal) : {prim_info}")
+        print(f"     📞 Tel 2 (Secundário): {sec_info}")
 
     # ── 5. Sumário Final ──────────────────────────────────────────────────────
     print(f"\n{'='*60}")

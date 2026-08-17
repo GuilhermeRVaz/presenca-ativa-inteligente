@@ -231,6 +231,9 @@ class ExtraordinaryCampaignService:
         self,
         campaign_id: str,
         dry_run: bool = False,
+        target_filter: Optional[Dict[str, Any]] = None,
+        ai_variants: Optional[List[str]] = None,
+        **kwargs: Any,
     ) -> Dict[str, Any]:
         """
         Carrega os alunos do público-alvo, distribui as 20 variações de mensagem e enfileira na tabela messages.
@@ -242,9 +245,9 @@ class ExtraordinaryCampaignService:
             raise ValueError(f"Campanha {campaign_id} não encontrada.")
 
         school_id = campaign["school_id"]
-        target_filter = campaign.get("target_filter") or {}
-        selected_classes = target_filter.get("classes", [])
-        all_school = target_filter.get("all_school", False)
+        effective_target_filter = target_filter or campaign.get("target_filter") or {}
+        selected_classes = effective_target_filter.get("classes", [])
+        all_school = effective_target_filter.get("all_school", False)
 
         res_vars = (
             self.client.table("campaign_ai_variants")
@@ -253,7 +256,11 @@ class ExtraordinaryCampaignService:
             .order("variant_index")
             .execute()
         )
-        variants = [v["message_text"] for v in res_vars.data] if res_vars.data else [campaign.get("base_message", "")]
+        variants = (
+            [v["message_text"] for v in res_vars.data]
+            if res_vars.data
+            else (ai_variants or [campaign.get("base_message", "")])
+        )
 
         # 2. Buscar alunos elegíveis
         query = self.client.table("students").select("id, name, class_name").eq("school_id", school_id)

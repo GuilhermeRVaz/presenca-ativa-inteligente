@@ -41,9 +41,13 @@ EVOLUTION_API_KEY = os.getenv("EVOLUTION_API_KEY", "")
 INSTANCE_NAME = os.getenv("EVOLUTION_API_INSTANCE", "")
 EVO_HEADERS = {"apikey": EVOLUTION_API_KEY, "Content-Type": "application/json"}
 
-PROTOCOL_RE = re.compile(r'P-([A-F0-9]{6})', re.IGNORECASE)
+PROTOCOL_RE = re.compile(r'\bP-?\s*([A-F0-9]{6})\b', re.IGNORECASE)
 TEMPLATE_MARKERS = ["para justificar, responda", "codigo do aluno:", "exemplo:"]
-CONFIRM_KEYWORDS = ["obrigado", "obrigada", "agradeço", "agradecemos", "motivo:", "entendi", "ciente"]
+CONFIRM_KEYWORDS = [
+    "obrigado", "obrigada", "agradeço", "agradecemos", "motivo:", "entendi", "ciente",
+    "veio sim", "erro na chamada", "afastada", "afastado", "atestado", "médicas", "medicas",
+    "questões médicas", "questoes medicas", "anotado", "anotada", "registrado", "registrada"
+]
 
 @dataclass
 class ChatEvent:
@@ -57,8 +61,11 @@ class ChatEvent:
     from_evolution: bool = False  # detectado via scan Evolution, nao veio da tabela responses
 
 def extract_protocol(text: str) -> str | None:
-    match = re.search(r"P-[A-Z0-9]{6}", text or "")
-    return match.group(0) if match else None
+    match = re.search(r"\bP-?\s*([A-F0-9]{6})\b", text or "", re.IGNORECASE)
+    if match:
+        token = match.group(1).upper()
+        return f"P-{token}"
+    return None
 
 def analyze_inbound(text: str, reason: str | None) -> tuple[bool, bool]:
     has_proto = extract_protocol(text) is not None
@@ -358,6 +365,24 @@ def suggest_student(messages: list[dict[str, Any]], text: str) -> tuple[str, flo
     delta = top_score - second_score
     if top_score >= 0.58 and delta >= 0.15:
         return top_name, top_score, "SUGESTAO_TEXTUAL_NAO_CONFIRMADA"
+
+    # Fallback: se o primeiro nome do aluno constar no texto e for único na fila de mensagens
+    text_norm = normalize_text(text)
+    for m in messages:
+        st_name = str(m.get("students", {}).get("name") or "")
+        st_tokens = normalize_text(st_name).split()
+        if st_tokens and len(st_tokens[0]) >= 3:
+            fn = st_tokens[0]
+            if fn in text_norm:
+                # Verifica se mais de um aluno tem esse primeiro nome na fila
+                all_hits = [
+                    str(msg.get("students", {}).get("name") or "")
+                    for msg in messages
+                    if fn in normalize_text(msg.get("students", {}).get("name") or "")
+                ]
+                if len(all_hits) == 1:
+                    return st_name, 0.9, "SUGESTAO_PRIMEIRO_NOME_UNICO"
+
     return "", top_score, "SEM_SUGESTAO_SEGURA"
 
 def run_consolidate(campaign_id: str, school_id: str) -> dict:
@@ -396,8 +421,23 @@ def run_consolidate(campaign_id: str, school_id: str) -> dict:
     or_filters = [f"campaign_id.in.({','.join(campaign_ids)})", f"received_at.gte.{campaign_date_iso}T00:00:00+00:00"]
     all_resps_raw = client.table("responses").select("*").or_(",".join(or_filters)).execute().data or []
     
+    # 2.5 Filtro de marcadores de envio da campanha inicial
+    initial_template_markers = [
+        "aqui e da", "aqui é da", "para justificar, responda",
+        "esteve ausente nos dias", "faltou nos dias",
+        "ausencia de", "ausência de", "poderia nos informar o motivo",
+        "codigo do aluno:", "código do aluno:", "exemplo:"
+    ]
+
     all_resps = []
     for r in all_resps_raw:
+        raw_id = r.get("raw_message_id") or ""
+        body_lower = (r.get("body") or "").lower()
+        
+        # Ignorar mensagens de disparo inicial da propria escola gravadas erroneamente no banco
+        if raw_id.startswith("outbound-") and any(m in body_lower for m in initial_template_markers):
+            continue
+
         if r.get("campaign_id") in campaign_ids:
             all_resps.append(r)
             continue

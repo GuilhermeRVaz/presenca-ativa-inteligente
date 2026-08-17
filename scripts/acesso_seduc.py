@@ -1,8 +1,13 @@
 import argparse
 import asyncio
 import os
+import sys
 import glob
 from datetime import datetime
+
+# Garantir codificacao UTF-8 no Windows Console
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8")
 
 import pandas as pd
 from playwright.async_api import async_playwright
@@ -46,8 +51,15 @@ def unificar_relatorios():
     if lista_df:
         df_final = pd.concat(lista_df, ignore_index=True)
         nome_saida = os.path.join(path, "Relatorio_Consolidado_BuscaAtiva.xlsx")
-        df_final.to_excel(nome_saida, index=False)
-        print(f"✨ PERFEITO! Arquivo consolidado e limpo criado: {nome_saida}")
+        try:
+            df_final.to_excel(nome_saida, index=False)
+            print(f"✨ PERFEITO! Arquivo consolidado e limpo criado: {nome_saida}")
+        except PermissionError:
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            nome_fallback = os.path.join(path, f"Relatorio_Consolidado_BuscaAtiva_{timestamp}.xlsx")
+            df_final.to_excel(nome_fallback, index=False)
+            print(f"\n⚠️ ATENÇÃO: O arquivo '{nome_saida}' está aberto no Excel ou em outro programa.")
+            print(f"✨ Para não perder os dados, o relatório foi salvo como: {nome_fallback}")
     else:
         print("⚠️ Não havia dados válidos para consolidar.")
 
@@ -159,8 +171,17 @@ def main():
         default=datetime.now().month,
         help="Mes numerico para selecionar na SEDUC (1-12). Padrao: mes atual.",
     )
+    parser.add_argument(
+        "--only-consolidate",
+        action="store_true",
+        help="Apenas unifica os arquivos Faltas_*.xlsx ja baixados sem rodar a extracao do Playwright.",
+    )
     args = parser.parse_args()
-    asyncio.run(run(selected_month=args.month))
+
+    if args.only_consolidate:
+        unificar_relatorios()
+    else:
+        asyncio.run(run(selected_month=args.month))
 
 
 if __name__ == "__main__":

@@ -134,3 +134,68 @@ class AIInteractionResponse(BaseModel):
     ok: bool = True
     interaction_id: str
 
+
+class StaffAlertRequest(BaseModel):
+    """Payload para disparar alerta WhatsApp para a equipe escolar (Junior, Paula, Anderson, Lucimara)."""
+    target_role: str = Field(..., description="Papel do destinatário: DIRETOR, SECRETARIA, VICE_DIRETOR, COORDENACAO")
+    student_name: str | None = Field(None, description="Nome do aluno")
+    student_class: str | None = Field(None, description="Turma do aluno")
+    guardian_name: str | None = Field(None, description="Nome do responsável")
+    guardian_phone: str | None = Field(None, description="Telefone do responsável")
+    alert_reason: str = Field(..., description="Motivo do alerta / Intenção (ex: Dúvida de Secretaria, Risco Elevado, Pedagógico)")
+    message_summary: str = Field(..., description="Resumo da mensagem ou texto do responsável")
+    unanswered_question: str | None = Field(None, description="Dúvida específica não respondida pela IA")
+    school_id: str | None = Field(None, description="UUID da escola")
+
+
+class StaffAlertResponse(BaseModel):
+    ok: bool = True
+    sent: bool
+    recipient_role: str
+    recipient_phone: str
+    provider_message_id: str | None = None
+    error: str | None = None
+
+
+class ClassificationRequest(BaseModel):
+    school_id: str | None = Field(None, description="UUID da escola")
+    sender_jid: str | None = Field(None, description="JID do responsável")
+    message_text: str = Field(..., description="Texto da mensagem recebida")
+    student_name: str | None = Field(None, description="Nome do aluno se disponível")
+    last_reason: str | None = Field(None, description="Último motivo registrado")
+    campaign_name: str | None = Field(None, description="Nome da campanha ativa")
+    messages_history: list[dict[str, Any]] | None = Field(None, description="Histórico recente de mensagens")
+
+
+class ClassificationResponse(BaseModel):
+    intent: str
+    category: str | None = None
+    risk_level: str = "LOW"
+    needs_human: bool = False
+    confidence: float = 1.0
+    needs_review: bool = False
+    handoff_reason: str | None = None
+
+
+class GenerateReplyRequest(BaseModel):
+    school_id: str | None = Field(None, description="UUID da escola")
+    sender_jid: str | None = Field(None, description="JID do responsável")
+    push_name: str | None = Field(None, description="Nome do remetente WhatsApp")
+    message_text: str = Field(..., description="Texto da mensagem")
+    student_name: str | None = Field(None, description="Nome do aluno")
+    category: str | None = Field(None, description="Categoria do motivo")
+    last_reason: str | None = Field(None, description="Último motivo registrado")
+    messages_history: list[dict[str, Any]] | None = Field(None, description="Histórico de mensagens")
+    rag_context: list[dict[str, Any]] | None = Field(None, description="Contexto RAG para SAC")
+
+
+class GenerateReplyResponse(BaseModel):
+    response_text: str
+    model: str = "gpt-4o-mini"
+    prompt_version: str = "v2"
+    detected_intent: str = "JUSTIFICATIVA_FALTA"
+    risk_level: str = "LOW"
+
+
+
+

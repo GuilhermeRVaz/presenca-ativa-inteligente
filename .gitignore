@@ -33,6 +33,7 @@ build/
 # Relatórios e outputs temporários
 relatorios/
 *.txt
+~$*.docx
 !README.md
 !RELATORIO_FINAL.txt
 !test_output.txt

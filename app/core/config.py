@@ -50,7 +50,14 @@ class Settings:
     use_session_correlation: bool = os.getenv("USE_SESSION_CORRELATION", "true").lower() == "true"
     enable_conversational_agent: bool = os.getenv("ENABLE_CONVERSATIONAL_AGENT", "true").lower() == "true"
     allow_unresolved_conversational_agent: bool = os.getenv("ALLOW_UNRESOLVED_CONVERSATIONAL_AGENT", "true").lower() == "true"
+    handoff_lock_hours: float = float(os.getenv("HANDOFF_LOCK_HOURS", "2"))
 
+    # Contatos de Alerta da Equipe Escolar
+    phone_diretor: str = os.getenv("PHONE_DIRETOR", "5514997053808").strip()  # Junior
+    phone_secretaria: str = os.getenv("PHONE_SECRETARIA", "5514991467883").strip()  # Paula
+    phone_vice_diretor: str = os.getenv("PHONE_VICE_DIRETOR", "5514997253567").strip()  # Anderson
+    phone_coordenacao: str = os.getenv("PHONE_COORDENACAO", "5514991488857").strip()  # Lucimara
 
 
 settings = Settings()
+

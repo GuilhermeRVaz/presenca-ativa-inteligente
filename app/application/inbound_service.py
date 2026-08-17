@@ -55,25 +55,24 @@ class InboundService:
             background_tasks.add_task(_direct_task)
             return
 
-        # Determine optimal debounce sleep time:
-        # If the message is just a greeting/short intro, wait longer (e.g., 20s)
-        # to allow the user to type their full question or justification.
-        # Otherwise, use the standard 12-second window.
-        sleep_seconds = 12.0
+        # Determine optimal debounce sleep time (acumulador de mensagens picadas):
+        # Janela base de 18 segundos. Se for saudação ou frase muito curta (<= 12 caracteres),
+        # aguarda 25 segundos para dar tempo do responsável digitar os detalhes da falta/dúvida.
+        sleep_seconds = 18.0
         try:
             txt = (inbound.text or "").strip().lower()
-            # Clean punctuation and check if it's a common short greeting
             clean_txt = "".join(c for c in txt if c.isalnum() or c.isspace()).strip()
             greetings = {
                 "bom dia", "boa tarde", "boa noite", "oi", "ola", "olá", "tudo bem", 
                 "tudo bem?", "opa", "bomdia", "boatarde", "boanoite", "obrigado", "obrigada",
                 "valeu", "grato", "grata", "por favor", "porfavor"
             }
-            if clean_txt in greetings or len(clean_txt) <= 8:
-                sleep_seconds = 20.0
-                logger.info("debounce_extended_for_greeting", sender_jid=sender_jid, sleep_seconds=sleep_seconds, text=txt)
+            if clean_txt in greetings or len(clean_txt) <= 12:
+                sleep_seconds = 25.0
+                logger.info("debounce_extended_for_short_message", sender_jid=sender_jid, sleep_seconds=sleep_seconds, text=txt)
         except Exception as e:
-            logger.warning("failed_to_parse_debounce_text_defaulting_to_8s", error=str(e))
+            logger.warning("failed_to_parse_debounce_text_defaulting_to_18s", error=str(e))
+
 
         async def _delayed_task():
             import asyncio
@@ -205,10 +204,10 @@ class InboundService:
             return WebhookResponse(status="ignored_group_chat", message_id=inbound.message_id)
 
         if inbound.from_me:
-            # Check if this outbound message is an automated campaign message
             is_campaign = False
+            # Check if this outbound message is recorded in messages table
             try:
-                if hasattr(self.repository, "client") and self.repository.client:
+                if hasattr(self.repository, "client") and self.repository.client and inbound.message_id:
                     msg_check = self.repository.client.schema("busca_ativa_v2") \
                         .table("messages") \
                         .select("id") \
@@ -219,7 +218,19 @@ class InboundService:
                         is_campaign = True
             except Exception as msg_exc:
                 logger.warning("failed_to_check_campaign_message", error=str(msg_exc))
-            
+
+            # Check if text contains initial campaign template markers
+            if not is_campaign and inbound.text:
+                txt_lower = inbound.text.lower()
+                template_markers = [
+                    "aqui e da", "aqui é da", "para justificar, responda",
+                    "esteve ausente", "faltou nos dias", "ausencia de", "ausência de",
+                    "poderia nos informar o motivo", "codigo do aluno:", "código do aluno:",
+                    "pedimos que nos informe", "pode nos dizer se esta tudo certo"
+                ]
+                if any(marker in txt_lower for marker in template_markers):
+                    is_campaign = True
+
             # Check if this matches a recent AI response
             is_ai = False
             if not is_campaign and inbound.text:
@@ -370,7 +381,8 @@ class InboundService:
         keywords = {
             "ILLNESS": [
                 "doenca", "doente", "febre", "gripe", "gripo", "dor", "dores", "medico", "hospital", 
-                "consulta", "internado", "cirurgia", "atestado", "tratamento", "exame", "remedio", "dentista"
+                "consulta", "internado", "cirurgia", "atestado", "tratamento", "exame", "remedio", "dentista",
+                "oftalmologista", "oftalmo", "oculista", "posto", "upa", "pronto socorro", "ps"
             ],
             "WORK": [
                 "trabalho", "trabalhar", "emprego", "servico", "bico", "entrevista"
@@ -448,20 +460,18 @@ class InboundService:
                     )
                     if not settings.allow_unresolved_conversational_agent:
                         try:
-                            if not inbound.sender_jid.endswith("@lid"):
-                                self.evolution_gateway.send_text(
-                                    to_jid=inbound.sender_jid,
-                                    text="Desculpe, não consegui identificar de qual aluno você está falando. Por favor, responda informando o *nome completo do aluno* para que possamos registrar a justificativa."
-                                )
-                                logger.info("fallback_message_sent", sender_jid=inbound.sender_jid)
-                            else:
-                                logger.info("fallback_message_skipped_for_lid", sender_jid=inbound.sender_jid)
+                            self.evolution_gateway.send_text(
+                                to_jid=inbound.sender_jid,
+                                text="Desculpe, não consegui identificar de qual aluno você está falando. Por favor, responda informando o *nome completo do aluno* e a *turma* para que possamos registrar a justificativa."
+                            )
+                            logger.info("fallback_message_sent", sender_jid=inbound.sender_jid)
                         except Exception as exc:
                             logger.error(
                                 "fallback_message_failed",
                                 error=str(exc),
                                 sender_jid=inbound.sender_jid,
                             )
+
 
             import uuid
             response_id = str(uuid.uuid4())
@@ -494,13 +504,13 @@ class InboundService:
                 elif settings.enable_conversational_agent:
                     is_spam = False
 
-                    # Handoff Check: Evitar responder automaticamente se houver atendimento humano ativo (< 24h)
+                    # Handoff Check: Evitar responder automaticamente se houver atendimento humano ativo (< handoff_lock_hours)
                     is_handoff = False
-                    if not is_spam:
+                    if not is_spam and settings.handoff_lock_hours > 0:
                         try:
                             from datetime import datetime, timezone, timedelta
                             now_dt = datetime.now(timezone.utc)
-                            since_dt = now_dt - timedelta(hours=24)
+                            since_dt = now_dt - timedelta(hours=settings.handoff_lock_hours)
 
                             active_handoff = self.repository.client.schema("busca_ativa_v2") \
                                 .table("responses") \
@@ -522,6 +532,7 @@ class InboundService:
                                     "conversational_skipped_due_to_active_handoff",
                                     sender_jid=inbound.sender_jid,
                                     handoff_age_hours=diff_hours,
+                                    lock_hours_limit=settings.handoff_lock_hours,
                                 )
                         except Exception as handoff_exc:
                             logger.warning("handoff_check_failed", error=str(handoff_exc))
@@ -736,6 +747,51 @@ class InboundService:
             )
             return False
 
+    def _classify_intent(self, text: str) -> str:
+        if not text:
+            return "OUTRO"
+        import unicodedata
+        def norm(t: str) -> str:
+            nfkd = unicodedata.normalize('NFKD', t)
+            return "".join([c for c in nfkd if not unicodedata.combining(c)]).lower()
+        
+        txt = norm(text)
+        
+        # 1. Confirmação de Presença
+        confirma_kw = [
+            "confirmar", "confirmo", "estarei la", "estarei la", "vou sim", "com certeza",
+            "estarei presente", "estaremos la", "estaremos la", "confirmado"
+        ]
+        if txt.strip() == "1" or any(kw in txt for kw in confirma_kw):
+            return "CONFIRMA_PRESENCA"
+
+        # 2. Informar Ausência ou Envio de Representante
+        ausencia_kw = [
+            "nao vou", "nao vou", "nao posso", "nao posso", "nao consigo", "nao consigo",
+            "trabalho esse horario", "estou trabalhando", "estarei viajando", "viagem", "viajar",
+            "doente", "padrasto", "marido", "avo", "avo", "representante", "vai a mae", "vai o pai",
+            "mandar o", "mandar a"
+        ]
+        if txt.strip() == "2" or any(kw in txt for kw in ausencia_kw):
+            return "INFORMA_AUSENCIA"
+
+        # 3. Dúvidas Logísticas sobre a Reunião
+        logistica_kw = [
+            "quarta", "horario", "horario", "horas", "local", "onde",
+            "endereco", "bairro", "refeitorio", "tolerancia", "tolerancia",
+            "filhos", "estacionamento", "atestado", "declaracao", "declaracao",
+            "pauta", "assunto", "boletim", "que vem", "quer vem", "data da reuniao"
+        ]
+        if "?" in text or any(kw in txt for kw in logistica_kw):
+            return "LOGISTICA"
+
+        # 4. Saudação simples
+        saudacao_kw = ["bom dia", "boa tarde", "boa noite", "oi", "ola", "tudo bem"]
+        if any(kw in txt for kw in saudacao_kw):
+            return "SAUDACAO"
+
+        return "OUTRO"
+
     def _trigger_n8n_chat_interaction(
         self,
         school_id: str,
@@ -748,21 +804,53 @@ class InboundService:
     ) -> bool:
         """
         Dispara webhook para o n8n para tratar a interação de chat conversacional.
-        Enriquece o payload com a última mensagem outbound enviada e contexto da campanha.
+        Enriquece o payload com contexto completo da campanha (FAQ, base message), intenção classificada
+        e aplica trava de deduplicação de 40 segundos para mensagens consecutivas.
         """
         if not settings.n8n_chat_webhook_url:
             logger.warning("n8n_chat_webhook_url_not_configured")
             return False
 
+        detected_intent = self._classify_intent(text)
+
+        # Trava de Cooldown / Deduplicação Inteligente (40 segundos por remetente individual)
+        try:
+            from datetime import datetime, timezone, timedelta
+            since_dt = datetime.now(timezone.utc) - timedelta(seconds=40)
+            recent_resp = (
+                self.repository.client.schema("busca_ativa_v2")
+                .table("responses")
+                .select("id, created_at")
+                .eq("school_id", school_id)
+                .eq("sender_jid", sender_jid)
+                .gte("created_at", since_dt.isoformat())
+                .order("created_at", desc=True)
+                .limit(1)
+                .execute()
+            )
+            if recent_resp.data and detected_intent in ["INFORMA_AUSENCIA", "CONFIRMA_PRESENCA", "SAUDACAO"]:
+                logger.info(
+                    "conversational_suppressed_duplicate_ai_reply_within_cooldown",
+                    sender_jid=sender_jid,
+                    intent=detected_intent,
+                )
+                return True
+        except Exception as cd_exc:
+            logger.warning("cooldown_check_failed", error=str(cd_exc))
+
+
         last_outbound_text = None
         campaign_name = None
         campaign_base_message = None
+        campaign_faq = None
+        campaign_type = None
+        campaign_obj = None
 
         try:
             res_msg = (
                 self.repository.client.schema("busca_ativa_v2")
                 .table("messages")
-                .select("body_preview, metadata, campaigns(name, base_message)")
+                .select("body_preview, metadata, campaigns(id, name, base_message, category, campaign_type, type, target_filter)")
                 .eq("wa_jid", sender_jid)
                 .order("created_at", desc=True)
                 .limit(1)
@@ -774,6 +862,17 @@ class InboundService:
                 camp_data = row.get("campaigns") or {}
                 campaign_name = camp_data.get("name")
                 campaign_base_message = camp_data.get("base_message")
+                campaign_type = camp_data.get("campaign_type") or camp_data.get("type") or "extraordinary"
+                tf = camp_data.get("target_filter") or {}
+                campaign_faq = tf.get("faq")
+                campaign_obj = {
+                    "id": camp_data.get("id"),
+                    "name": campaign_name,
+                    "type": campaign_type,
+                    "category": camp_data.get("category"),
+                    "base_message": campaign_base_message,
+                    "faq": campaign_faq,
+                }
         except Exception as exc:
             logger.warning("failed_to_fetch_last_outbound_context", error=str(exc))
 
@@ -788,6 +887,10 @@ class InboundService:
             "last_outbound_text": last_outbound_text,
             "campaign_name": campaign_name,
             "campaign_base_message": campaign_base_message,
+            "campaign_type": campaign_type,
+            "campaign_faq": campaign_faq,
+            "campaign": campaign_obj,
+            "detected_intent": detected_intent,
         }
 
         try:
@@ -799,6 +902,7 @@ class InboundService:
                     "n8n_chat_interaction_triggered",
                     school_id=school_id,
                     sender_jid=sender_jid,
+                    intent=detected_intent,
                     response=data,
                 )
                 return True
@@ -838,5 +942,256 @@ class InboundService:
                 source="unresolved",
                 session=None,
             )
+
+    def classify_inbound_message(
+        self,
+        *,
+        school_id: str | None = None,
+        sender_jid: str | None = None,
+        message_text: str,
+        student_name: str | None = None,
+        last_reason: str | None = None,
+        campaign_name: str | None = None,
+        messages_history: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
+        """
+        Classifica a intenção e o risco da mensagem recebida utilizando OpenAI (ou fallback local).
+        Garante retornos estruturados sem falhas de conexão ou timeouts na rede n8n.
+        """
+        if not message_text or not message_text.strip():
+            return {
+                "intent": "DESCONHECIDO",
+                "category": None,
+                "risk_level": "LOW",
+                "needs_human": False,
+                "confidence": 0.0,
+                "needs_review": False,
+                "handoff_reason": None,
+            }
+
+        if settings.openai_api_key:
+            try:
+                system_prompt = (
+                    "Você é a IA 1 (Classificador) da escola Décia. Seu único objetivo é classificar a intenção e o risco das mensagens recebidas e retornar estritamente um JSON.\n\n"
+                    "Campos no JSON:\n"
+                    "- intent: 'JUSTIFICATIVA_FALTA' (se o responsável justifica faltas ou atrasos), 'DUVIDA_SECRETARIA' (dúvidas sobre horários, secretaria, documentos, matrículas), 'SAUDACAO' (cumprimentos como olá, bom dia, tudo bem), 'AGRADECIMENTO_DESPEDIDA' (agradecimentos como obrigado, valeu, ou despedidas como tchau, até mais), 'HUMANO' (solicitação explícita de falar com humano), ou 'DESCONHECIDO' (outros assuntos).\n"
+                    "- category: 'DOENCA', 'TRABALHO', 'TRAVEL', 'TRANSPORTE', 'FAMILIA', 'OUTRO' (se intent for JUSTIFICATIVA_FALTA), ou null caso contrário.\n"
+                    "- risk_level: 'LOW' (baixo risco), 'MEDIUM' (desânimo, recorrência moderada), 'HIGH' (bullying, conflitos graves, problemas jurídicos, ameaças, agressividade, saúde mental grave).\n"
+                    "- needs_human: true (se risk_level for HIGH, se houver agressividade/bullying, solicitação explícita ou tom conflituoso), ou false caso contrário.\n"
+                    "- confidence: float entre 0.0 e 1.0 (grau de certeza na classificação).\n\n"
+                    "Regra de Ouro: Retorne APENAS o JSON. Não adicione texto explicativo ou markdown."
+                )
+
+                user_prompt = (
+                    f"Contexto:\n"
+                    f"- Aluno: {student_name or 'não identificado'}\n"
+                    f"- Último Motivo: {last_reason or 'não informado'}\n"
+                    f"- Campanha: {campaign_name or 'não informado'}\n\n"
+                    f"Histórico Recente:\n{json.dumps(messages_history or [], ensure_ascii=False)}\n\n"
+                    f"Mensagem Atual: {message_text}\n\n"
+                    f"Retorne agora a classificação JSON estrita."
+                )
+
+                with httpx.Client(timeout=12.0) as client:
+                    resp = client.post(
+                        "https://api.openai.com/v1/chat/completions",
+                        headers={
+                            "Authorization": f"Bearer {settings.openai_api_key}",
+                            "Content-Type": "application/json",
+                        },
+                        json={
+                            "model": "gpt-4o-mini",
+                            "messages": [
+                                {"role": "system", "content": system_prompt},
+                                {"role": "user", "content": user_prompt},
+                            ],
+                            "response_format": {"type": "json_object"},
+                        },
+                    )
+                    resp.raise_for_status()
+                    data = resp.json()
+                    content = data["choices"][0]["message"]["content"].strip()
+                    parsed = json.loads(content)
+
+                    intent = parsed.get("intent", "DESCONHECIDO")
+                    category = parsed.get("category")
+                    risk_level = parsed.get("risk_level", "LOW")
+                    needs_human = bool(parsed.get("needs_human", False))
+                    confidence = float(parsed.get("confidence", 1.0))
+                    needs_review = needs_human
+
+                    if confidence < 0.55:
+                        needs_human = True
+                        needs_review = True
+                        handoff_reason = "baixa_confianca"
+                    elif needs_human:
+                        handoff_reason = category or "detectado_ia"
+                    else:
+                        handoff_reason = None
+
+                    return {
+                        "intent": intent,
+                        "category": category,
+                        "risk_level": risk_level,
+                        "needs_human": needs_human,
+                        "confidence": confidence,
+                        "needs_review": needs_review,
+                        "handoff_reason": handoff_reason,
+                    }
+            except Exception as llm_exc:
+                logger.warning("openai_classification_failed_using_local_rules", error=str(llm_exc))
+
+        category = self._classify_reason_from_text(message_text)
+        intent = self._classify_intent(message_text)
+        if intent == "OUTRO":
+            intent = "JUSTIFICATIVA_FALTA" if category != "OTHER" else "DESCONHECIDO"
+
+        return {
+            "intent": intent,
+            "category": category if intent == "JUSTIFICATIVA_FALTA" else None,
+            "risk_level": "LOW",
+            "needs_human": False,
+            "confidence": 0.85,
+            "needs_review": False,
+            "handoff_reason": None,
+        }
+
+    def send_staff_alert(
+
+        self,
+        *,
+        target_role: str,
+        student_name: str | None = None,
+        student_class: str | None = None,
+        guardian_name: str | None = None,
+        guardian_phone: str | None = None,
+        alert_reason: str,
+        message_summary: str,
+        unanswered_question: str | None = None,
+        school_id: str | None = None,
+    ) -> dict[str, Any]:
+        role_upper = (target_role or "").strip().upper()
+        if role_upper in ("DIRETOR", "DIRECAO"):
+            phone = settings.phone_diretor
+            role_name = "Direção (Junior)"
+        elif role_upper in ("SECRETARIA", "GERENTE", "ADMINISTRATIVO"):
+            phone = settings.phone_secretaria
+            role_name = "Secretaria (Paula)"
+        elif role_upper in ("VICE_DIRETOR", "VICE", "DISCIPLINA"):
+            phone = settings.phone_vice_diretor
+            role_name = "Vice-Direção (Anderson)"
+        elif role_upper in ("COORDENACAO", "PEDAGOGICO", "COORDENADOR"):
+            phone = settings.phone_coordenacao
+            role_name = "Coordenação Pedagógica (Lucimara)"
+        else:
+            phone = settings.phone_diretor
+            role_name = f"Equipe ({target_role})"
+
+        student_info = student_name or "Não identificado"
+        if student_class:
+            student_info += f" ({student_class})"
+
+        guardian_info = guardian_name or "Responsável"
+        phone_info = guardian_phone or "Não informado"
+        question_block = f"\n❓ *Questão Pendente:* {unanswered_question}" if unanswered_question else ""
+
+        alert_text = (
+            f"⚠️ *ALERTA DE ATENDIMENTO ESCOLAR — BUSCA ATIVA* ⚠️\n\n"
+            f"Destino: {role_name}\n"
+            f"🎓 *Aluno:* {student_info}\n"
+            f"👤 *Responsável:* {guardian_info}\n"
+            f"📞 *Telefone do Responsável:* {phone_info}\n"
+            f"📌 *Motivo do Alerta:* {alert_reason}\n\n"
+            f"💬 *Resumo / Mensagem do Responsável:*\n"
+            f'"{message_summary}"'
+            f"{question_block}\n\n"
+            f"_Ação necessária: Por favor, entre em contato ou verifique a ocorrência no sistema._"
+        )
+
+        res = self.evolution_gateway.send_text(to_jid=phone, text=alert_text)
+        logger.info(
+            "staff_alert_dispatched",
+            role=target_role,
+            phone=phone,
+            success=res.success,
+            provider_message_id=res.provider_message_id,
+            error=res.error,
+        )
+        return {
+            "sent": res.success,
+            "recipient_role": role_name,
+            "recipient_phone": phone,
+            "provider_message_id": res.provider_message_id,
+            "error": res.error,
+        }
+
+    def generate_emphetic_reply(
+        self,
+        *,
+        student_name: str | None = None,
+        category: str | None = None,
+        push_name: str | None = None,
+        message_text: str = "",
+    ) -> str:
+        name_display = student_name if student_name and str(student_name).strip().lower() not in ("aluno", "none", "null", "") else None
+
+        if not name_display:
+            return (
+                "Olá! Agradecemos o envio das informações. "
+                "Para que possamos justificar e formalizar no sistema da Escola Décia, "
+                "por favor nos informe o *nome completo do aluno* e a *turma* dele."
+            )
+
+        cat_upper = (category or "").upper()
+        msg_lower = message_text.lower()
+        feeling_better = "melhor" in msg_lower or "remedio" in msg_lower or "remédio" in msg_lower or "alta" in msg_lower
+
+        if cat_upper in ("DOENCA", "ILLNESS"):
+            better_phrase = " Ficamos felizes em saber que já está se sentindo melhor!" if feeling_better else ""
+            return (
+                f"Olá! Agradecemos por avisar e confirmar a ausência do(a) estudante *{name_display}*. "
+                f"Registramos a justificativa por motivo de saúde no sistema da Escola Décia.{better_phrase} "
+                f"Estimamos uma rápida recuperação e melhoras!"
+            )
+        elif cat_upper in ("TRABALHO", "WORK"):
+            return (
+                f"Olá! Agradecemos por comunicar a situação do(a) estudante *{name_display}*. "
+                f"O registro por motivo de trabalho foi formalizado junto à equipe escolar. Conte conosco!"
+            )
+        elif cat_upper in ("VIAGEM", "TRAVEL"):
+            return (
+                f"Olá! Agradecemos por informar a viagem do(a) aluno(a) *{name_display}*. "
+                f"Registramos a justificativa no sistema da escola. Uma excelente viagem!"
+            )
+        elif cat_upper in ("TRANSPORTE", "SCHOOL_ISSUE"):
+            return (
+                f"Olá! Registramos a justificativa referente às questões de transporte para o(a) estudante *{name_display}*. "
+                f"Agradecemos o aviso e estamos à disposição."
+            )
+        else:
+            return (
+                f"Olá! Agradecemos o contato e por justificar a falta do(a) aluno(a) *{name_display}*. "
+                f"Registramos as informações com cuidado no sistema da Escola Décia."
+            )
+
+    def generate_sac_reply(
+        self,
+        *,
+        message_text: str,
+        rag_context: list[dict[str, Any]] | None = None,
+    ) -> str:
+        if rag_context and len(rag_context) > 0:
+            info = rag_context[0].get("content") or rag_context[0].get("text") or str(rag_context[0])
+            return (
+                f"Olá! Agradecemos a sua mensagem para a Escola Décia.\n\n"
+                f"Sobre a sua dúvida: {info}\n\n"
+                f"Caso precise de mais informações, nossa equipe da secretaria está à disposição!"
+            )
+        return (
+            "Olá! Agradecemos a sua mensagem. Sua dúvida foi registrada com atenção "
+            "e nossa equipe da secretaria da Escola Décia entrará em contato em breve para ajudá-lo(a)."
+        )
+
+
 
 
