@@ -62,14 +62,22 @@ WARMUP_SCHEDULE = {
 }
 
 
+_ORCHESTRATOR_SUPABASE_CLIENT = None
+
+
 def _build_supabase_client():
+    global _ORCHESTRATOR_SUPABASE_CLIENT
+    if _ORCHESTRATOR_SUPABASE_CLIENT is not None:
+        return _ORCHESTRATOR_SUPABASE_CLIENT
+
     if not settings.supabase_url or not settings.supabase_key:
         raise RuntimeError("SUPABASE_URL e SUPABASE_KEY devem estar configurados no .env")
     from supabase import create_client
     from supabase.lib.client_options import SyncClientOptions
 
-    options = SyncClientOptions(postgrest_client_timeout=90.0)
-    return create_client(settings.supabase_url, settings.supabase_key, options=options)
+    options = SyncClientOptions(postgrest_client_timeout=120.0)
+    _ORCHESTRATOR_SUPABASE_CLIENT = create_client(settings.supabase_url, settings.supabase_key, options=options)
+    return _ORCHESTRATOR_SUPABASE_CLIENT
 
 
 def _short_protocol(tracking_ref: str) -> str:
@@ -89,7 +97,7 @@ def _execute_with_retry(
 ) -> Any:
     """
     Executa query com Exponential Backoff + Jitter.
-    Formula: min(60, (2 ** attempt) + random.uniform(0, 2))
+    Retentativa rápida e silenciosa na 1ª falha para prevenir fadiga de conexão no Windows.
     """
     last_exc: Exception | None = None
     for attempt in range(1, attempts + 1):
@@ -99,6 +107,10 @@ def _execute_with_retry(
             last_exc = exc
             if attempt >= attempts:
                 break
+            # Na primeira falha transiente de conexão, tenta rapidamente (0.3s) sem poluir os logs
+            if attempt == 1:
+                time.sleep(0.3)
+                continue
             delay = min(60.0, (2.0 ** attempt) + random.uniform(0.0, 2.0))
             print(
                 f"{Colors.YELLOW}[SUPABASE BACKOFF RETRY]{Colors.RESET} {label} falhou "

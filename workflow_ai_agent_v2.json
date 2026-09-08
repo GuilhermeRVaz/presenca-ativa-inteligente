@@ -1,0 +1,235 @@
+{
+  "name": "Busca Ativa - Agente de IA v2 (LangChain Moderno Multimodal)",
+  "nodes": [
+    {
+      "id": "node-webhook-v2",
+      "name": "Webhook Chat Inbound",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        100,
+        300
+      ],
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "chat-interaction",
+        "responseMode": "onReceived",
+        "options": {}
+      }
+    },
+    {
+      "id": "node-agent-main",
+      "name": "Agente Atendimento Escolar",
+      "type": "@n8n/n8n-nodes-langchain.agent",
+      "typeVersion": 1.7,
+      "position": [
+        500,
+        300
+      ],
+      "parameters": {
+        "agent": "openAiFunctionsAgent",
+        "promptType": "define",
+        "text": "={{ $node['Webhook Chat Inbound'].json.body?.message_text || $node['Webhook Chat Inbound'].json.message_text || 'Olá' }}",
+        "options": {
+          "systemMessage": "Você é a IA de Atendimento Inteligente e Acolhedor da Escola Décia. Seu objetivo é acolher os contatos de pais/responsáveis de alunos com extrema empatia, cortesia, humanidade e agilidade.\n\nRegras de Ouro de Conversação:\n1. Use a ferramenta 'Buscar_Contexto_Aluno' para identificar o aluno e verificar faltas recentes.\n2. Se o contexto identificar o aluno (ex: Bernardo Nóbrega), NUNCA peça o nome completo dele ou a turma novamente! Confirme o recebimento da falta com carinho e desejando melhoras/apoio.\n3. Se o pai/mãe informar um motivo de saúde, trabalho, viagem ou transporte, use a ferramenta 'Classificar_e_Responder'.\n4. Se o caso for crítico (ameaça, saúde grave, emergência), acione imediatamente a ferramenta 'Notificar_Trio_Gestor' direcionada ao Diretor Junior ou Vice-Diretor Anderson.\n5. Se o responsável anexar um atestado/foto ou enviar áudio, confirme o recebimento e notifique a secretaria Paula."
+        }
+      }
+    },
+    {
+      "id": "node-tool-context",
+      "name": "Tool: Buscar_Contexto_Aluno",
+      "type": "@n8n/n8n-nodes-langchain.toolHttpRequest",
+      "typeVersion": 1.1,
+      "position": [
+        400,
+        580
+      ],
+      "parameters": {
+        "name": "Buscar_Contexto_Aluno",
+        "description": "Busca instantaneamente o nome do aluno, histórico de conversas e faltas pelo número de WhatsApp ou mensagem.",
+        "method": "GET",
+        "url": "http://host.docker.internal:8000/students/session_context",
+        "sendQuery": true,
+        "specifyQuery": "json",
+        "jsonQuery": "={{ JSON.stringify({ sender_jid: $node['Webhook Chat Inbound'].json.body?.sender_jid || $node['Webhook Chat Inbound'].json.sender_jid, message_text: $node['Webhook Chat Inbound'].json.body?.message_text || $node['Webhook Chat Inbound'].json.message_text, last_outbound_text: $node['Webhook Chat Inbound'].json.body?.last_outbound_text || $node['Webhook Chat Inbound'].json.last_outbound_text }) }}"
+      }
+    },
+    {
+      "id": "node-tool-classify",
+      "name": "Tool: Classificar_e_Responder",
+      "type": "@n8n/n8n-nodes-langchain.toolHttpRequest",
+      "typeVersion": 1.1,
+      "position": [
+        600,
+        580
+      ],
+      "parameters": {
+        "name": "Classificar_e_Responder",
+        "description": "Gera a resposta empática imediata e formaliza o motivo da falta (doença, trabalho, viagem, transporte, etc.).",
+        "method": "POST",
+        "url": "http://host.docker.internal:8000/inbound/classify",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ school_id: $node['Webhook Chat Inbound'].json.body?.school_id || 'aac99735-32cb-4615-b2cb-0be315f18374', sender_jid: $node['Webhook Chat Inbound'].json.body?.sender_jid || $node['Webhook Chat Inbound'].json.sender_jid, message_text: $node['Webhook Chat Inbound'].json.body?.message_text || $node['Webhook Chat Inbound'].json.message_text, push_name: $node['Webhook Chat Inbound'].json.body?.push_name || '' }) }}"
+      }
+    },
+    {
+      "id": "node-tool-alert",
+      "name": "Tool: Notificar_Trio_Gestor",
+      "type": "@n8n/n8n-nodes-langchain.toolHttpRequest",
+      "typeVersion": 1.1,
+      "position": [
+        800,
+        580
+      ],
+      "parameters": {
+        "name": "Notificar_Trio_Gestor",
+        "description": "Notifica a equipe gestora da escola (Diretor Junior, Vice Anderson, Coordenadora Lucimara, Secretaria Paula) para casos urgentes ou documentos.",
+        "method": "POST",
+        "url": "http://host.docker.internal:8000/inbound/staff_alert",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ target_role: 'SECRETARIA', alert_reason: 'Atendimento do Responsável', message_summary: $node['Webhook Chat Inbound'].json.body?.message_text || '' }) }}"
+      }
+    },
+    {
+      "id": "node-memory",
+      "name": "Window Buffer Memory",
+      "type": "@n8n/n8n-nodes-langchain.memoryBufferWindow",
+      "typeVersion": 1.3,
+      "position": [
+        500,
+        100
+      ],
+      "parameters": {
+        "sessionKey": "={{ $node['Webhook Chat Inbound'].json.body?.sender_jid || $node['Webhook Chat Inbound'].json.sender_jid }}",
+        "k": 5
+      }
+    },
+    {
+      "id": "node-send-whatsapp",
+      "name": "Evolution API Send",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        900,
+        300
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "=http://host.docker.internal:8084/message/sendText/busca_ativa_decic",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            },
+            {
+              "name": "apikey",
+              "value": "clinivet_secret_key_2026_super_segura"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ number: ($node['Webhook Chat Inbound'].json.body?.sender_jid || $node['Webhook Chat Inbound'].json.sender_jid).replace('@s.whatsapp.net', ''), text: $json.output || $json.response_text || 'Agradecemos o seu contato!' }) }}",
+        "options": {
+          "timeout": 15000
+        }
+      },
+      "settings": {
+        "onError": "continueRegularOutput"
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 1000
+    }
+  ],
+  "connections": {
+    "Webhook Chat Inbound": {
+      "main": [
+        [
+          {
+            "node": "Agente Atendimento Escolar",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Agente Atendimento Escolar": {
+      "main": [
+        [
+          {
+            "node": "Evolution API Send",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Tool: Buscar_Contexto_Aluno": {
+      "ai_tool": [
+        [
+          {
+            "node": "Agente Atendimento Escolar",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Tool: Classificar_e_Responder": {
+      "ai_tool": [
+        [
+          {
+            "node": "Agente Atendimento Escolar",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Tool: Notificar_Trio_Gestor": {
+      "ai_tool": [
+        [
+          {
+            "node": "Agente Atendimento Escolar",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Window Buffer Memory": {
+      "ai_memory": [
+        [
+          {
+            "node": "Agente Atendimento Escolar",
+            "type": "ai_memory",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  }
+}

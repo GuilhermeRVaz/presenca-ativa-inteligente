@@ -20,6 +20,7 @@ import argparse
 import hashlib
 import sys
 import json
+from collections import defaultdict
 from datetime import date, datetime, timezone
 from pathlib import Path
 
@@ -194,31 +195,35 @@ def main():
     students_with_secondary = []
     students_without_secondary = []
 
-    # 3. Resolver contatos secundários para os elegíveis
-    for stu_id in eligible_student_ids:
-        orig_msg = student_primary_messages[stu_id]
-        student_name = orig_msg.get("metadata", {}).get("nome_excel", "Aluno")
-
-        # Buscar responsáveis secundários
+    # 3. Resolver contatos secundários para os elegíveis (em lote)
+    if eligible_student_ids:
         operation_sg = lambda: (
             client.schema("busca_ativa_v2")
             .table("student_guardians")
-            .select("guardian_id, created_at, guardians(id, name, phone_e164, wa_jid)")
-            .eq("student_id", stu_id)
+            .select("student_id, guardian_id, created_at, guardians(id, name, phone_e164, wa_jid)")
+            .in_("student_id", list(eligible_student_ids))
             .eq("is_primary", False)
             .order("created_at", desc=False)
             .execute()
         )
-        sg_res = _execute_with_retry(operation_sg, operation="fetch_secondary_guardian")
+        sg_res = _execute_with_retry(operation_sg, operation="fetch_secondary_guardians_batch")
 
-        if sg_res.data and sg_res.data[0].get("guardians"):
-            guardian = sg_res.data[0]["guardians"]
-            students_with_secondary.append((stu_id, orig_msg, guardian))
-        else:
-            students_without_secondary.append((stu_id, orig_msg))
+        secondary_by_student = defaultdict(list)
+        for sg in (sg_res.data or []):
+            if sg.get("guardians"):
+                secondary_by_student[sg["student_id"]].append(sg["guardians"])
+
+        for stu_id in eligible_student_ids:
+            orig_msg = student_primary_messages.get(stu_id) or {}
+            sec_guardians = secondary_by_student.get(stu_id, [])
+            if sec_guardians:
+                students_with_secondary.append((stu_id, orig_msg, sec_guardians[0]))
+            else:
+                students_without_secondary.append((stu_id, orig_msg))
 
     print(f" - Possuem segundo contato            : {len(students_with_secondary)}")
     print(f" - Não possuem segundo contato        : {len(students_without_secondary)}")
+    sys.stdout.flush()
 
     # Se for modo PREVIEW, formata e printa JSON estruturado para o Streamlit ler
     if args.preview:
@@ -228,9 +233,9 @@ def main():
             "without_secondary": len(students_without_secondary),
             "eligible_students": [
                 {
-                    "student_name": msg["metadata"].get("nome_excel", "Aluno(a)"),
+                    "student_name": (msg.get("metadata") or {}).get("nome_excel", "Aluno(a)"),
                     "student_id": stu_id,
-                    "primary_guardian": msg["metadata"].get("guardian_name", "Responsável Primário"),
+                    "primary_guardian": (msg.get("metadata") or {}).get("guardian_name", "Responsável Primário"),
                     "secondary_guardian": g["name"],
                     "secondary_phone": g["phone_e164"],
                 }
@@ -238,9 +243,9 @@ def main():
             ],
             "no_secondary_students": [
                 {
-                    "student_name": msg["metadata"].get("nome_excel", "Aluno(a)"),
+                    "student_name": (msg.get("metadata") or {}).get("nome_excel", "Aluno(a)"),
                     "student_id": stu_id,
-                    "primary_guardian": msg["metadata"].get("guardian_name", "Responsável Primário"),
+                    "primary_guardian": (msg.get("metadata") or {}).get("guardian_name", "Responsável Primário"),
                 }
                 for stu_id, msg in students_without_secondary
             ]
@@ -248,16 +253,19 @@ def main():
         
         print(f"\n{Colors.GREEN}=== CANDIDATOS DO SEGUNDO CONTATO (PREVIEW) ==={Colors.RESET}")
         for stu_id, msg, g in students_with_secondary:
-            print(f" [ELEGIVEL] {msg['metadata'].get('nome_excel', 'Aluno')}: Contatar {g['name']} ({g['phone_e164']})")
+            s_name = (msg.get("metadata") or {}).get("nome_excel", "Aluno")
+            print(f" [ELEGIVEL] {s_name}: Contatar {g['name']} ({g['phone_e164']})")
         
         if students_without_secondary:
             print(f"\n{Colors.YELLOW}=== ALERTAS: ALUNOS SEM SEGUNDO CONTATO ==={Colors.RESET}")
             for stu_id, msg in students_without_secondary:
-                print(f" [ALERT] {msg['metadata'].get('nome_excel', 'Aluno')}: Sem responsável secundário configurado.")
+                s_name = (msg.get("metadata") or {}).get("nome_excel", "Aluno")
+                print(f" [ALERT] {s_name}: Sem responsável secundário configurado.")
 
         print("\n__PREVIEW_JSON_START__")
         print(json.dumps(preview_data, ensure_ascii=False))
         print("__PREVIEW_JSON_END__")
+        sys.stdout.flush()
         sys.exit(0)
 
     # 4. Executar carga real/dry-run

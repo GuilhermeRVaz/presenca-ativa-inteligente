@@ -47,9 +47,25 @@ class EvolutionPayloadParser:
         if isinstance(extended, dict) and extended.get("text") is not None:
             return str(extended["text"])
         image = message.get("imageMessage")
-        if isinstance(image, dict) and image.get("caption") is not None:
-            return str(image["caption"])
+        if isinstance(image, dict):
+            caption = str(image.get("caption") or "").strip()
+            return f"{caption} [FOTO_DOCUMENTO]".strip() if caption else "[FOTO_DOCUMENTO]"
+        document = message.get("documentMessage")
+        if isinstance(document, dict):
+            caption = str(document.get("caption") or "").strip()
+            doc_name = document.get("fileName") or "documento.pdf"
+            return f"{caption} [DOCUMENTO_ANEXADO: {doc_name}]".strip() if caption else f"[DOCUMENTO_ANEXADO: {doc_name}]"
+        audio = message.get("audioMessage")
+        if isinstance(audio, dict):
+            return "[AUDIO_PTT]"
+        data = payload.get("data") if isinstance(payload.get("data"), dict) else {}
+        msg_type = data.get("messageType") or payload.get("messageType")
+        if msg_type in ("audioMessage", "audio"):
+            return "[AUDIO_PTT]"
+        if msg_type in ("imageMessage", "image"):
+            return "[FOTO_DOCUMENTO]"
         return str(payload.get("text") or payload.get("message") or "")
+
 
     def _extract_stanza_id(self, message: dict[str, Any], payload: dict[str, Any]) -> str | None:
         extended = message.get("extendedTextMessage")

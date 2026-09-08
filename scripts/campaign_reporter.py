@@ -267,6 +267,16 @@ def run_orchestrator(campaign_id=None, skip_backfill=False, day=None, month=None
     except Exception as e:
         print(f"{Colors.YELLOW}  AVISO: Relatorio completo falhou: {e}{Colors.RESET}")
 
+    # ── ETAPA 4: Relatorio Oficial Auditado por IA (Markdown + Word) ───
+    print(f"\n{Colors.CYAN}[ETAPA 5/5] Relatório Oficial Auditado por IA (E.E. Profa. Décia L. M. dos Santos)...{Colors.RESET}")
+    try:
+        from scripts.generate_official_ai_report import generate_official_report
+        res_ai = generate_official_report(absence_days=absence_days, campaign_id=campaign_id)
+        print(f"{Colors.GREEN}  MD Oficial:   {res_ai['markdown_path']}{Colors.RESET}")
+        print(f"{Colors.GREEN}  Word Oficial: {res_ai['docx_path']}{Colors.RESET}")
+    except Exception as e:
+        print(f"{Colors.YELLOW}  AVISO: Relatório oficial IA falhou: {e}{Colors.RESET}")
+
     # ── Resumo final ──────────────────────────────────────────────────────
     print("\n" + "=" * 65)
     print(f"{Colors.BOLD}  RESUMO DA CAMPANHA{Colors.RESET}")

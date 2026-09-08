@@ -811,6 +811,20 @@ class InboundService:
             logger.warning("n8n_chat_webhook_url_not_configured")
             return False
 
+        # Enriquecimento Multimodal Automático (Áudio Whisper & Imagem GPT-4o Vision)
+        enriched_text = text or ""
+        if "[AUDIO_PTT]" in enriched_text:
+            transcription = self.transcribe_audio(remote_jid=sender_jid)
+            enriched_text = enriched_text.replace("[AUDIO_PTT]", f'[Áudio Transcrito do Responsável]: "{transcription}"')
+        if "[FOTO_DOCUMENTO]" in enriched_text or "[DOCUMENTO_ANEXADO" in enriched_text:
+            analise = self.analyze_document_photo(remote_jid=sender_jid)
+            doc_summary = analise.get("summary") or "Atestado médico/declaração de comparecimento anexada."
+            enriched_text = enriched_text.replace("[FOTO_DOCUMENTO]", f'[Documento/Atestado Recebido em Foto]: {doc_summary}')
+            if "[DOCUMENTO_ANEXADO" in enriched_text:
+                import re
+                enriched_text = re.sub(r"\[DOCUMENTO_ANEXADO:[^\]]+\]", f'[Documento/Atestado Recebido]: {doc_summary}', enriched_text)
+
+        text = enriched_text
         detected_intent = self._classify_intent(text)
 
         # Trava de Cooldown / Deduplicação Inteligente (40 segundos por remetente individual)
@@ -969,6 +983,59 @@ class InboundService:
                 "handoff_reason": None,
             }
 
+        # Classificação local determinística ultrarrápida (<1ms) para justificativas comuns
+        msg_lower = message_text.lower()
+        if any(w in msg_lower for w in ["viagem", "viajar", "viajando", "viajou"]):
+            return {
+                "intent": "JUSTIFICATIVA_FALTA",
+                "category": "TRAVEL",
+                "risk_level": "LOW",
+                "needs_human": False,
+                "confidence": 1.0,
+                "needs_review": False,
+                "handoff_reason": None,
+            }
+        elif any(w in msg_lower for w in ["doente", "médico", "medico", "hospital", "diarreia", "diarréia", "vômito", "vomito", "febre", "gripe", "passando mal", "dor", "consulta", "exame", "remedio", "remédio", "atestado", "enxaqueca", "olho", "barriga", "saúde", "saude", "cuidar em casa"]):
+            return {
+                "intent": "JUSTIFICATIVA_FALTA",
+                "category": "DOENCA",
+                "risk_level": "LOW",
+                "needs_human": False,
+                "confidence": 1.0,
+                "needs_review": False,
+                "handoff_reason": None,
+            }
+        elif any(w in msg_lower for w in ["documento", "documentos", "matrícula", "matricula", "transferência", "transferencia", "secretaria", "horário", "horario", "tirar documento"]):
+            return {
+                "intent": "DUVIDA_SECRETARIA",
+                "category": None,
+                "risk_level": "LOW",
+                "needs_human": False,
+                "confidence": 1.0,
+                "needs_review": False,
+                "handoff_reason": None,
+            }
+        elif any(w in msg_lower for w in ["trabalho", "trabalhando", "serviço", "servico"]):
+            return {
+                "intent": "JUSTIFICATIVA_FALTA",
+                "category": "TRABALHO",
+                "risk_level": "LOW",
+                "needs_human": False,
+                "confidence": 1.0,
+                "needs_review": False,
+                "handoff_reason": None,
+            }
+        elif any(w in msg_lower for w in ["transporte", "ônibus", "onibus", "perua"]):
+            return {
+                "intent": "JUSTIFICATIVA_FALTA",
+                "category": "TRANSPORTE",
+                "risk_level": "LOW",
+                "needs_human": False,
+                "confidence": 1.0,
+                "needs_review": False,
+                "handoff_reason": None,
+            }
+
         if settings.openai_api_key:
             try:
                 system_prompt = (
@@ -992,7 +1059,7 @@ class InboundService:
                     f"Retorne agora a classificação JSON estrita."
                 )
 
-                with httpx.Client(timeout=12.0) as client:
+                with httpx.Client(timeout=2.5) as client:
                     resp = client.post(
                         "https://api.openai.com/v1/chat/completions",
                         headers={
@@ -1125,6 +1192,140 @@ class InboundService:
             "error": res.error,
         }
 
+    def forward_medical_certificate(
+        self,
+        *,
+        student_name: str,
+        student_class: str | None = None,
+        guardian_name: str | None = None,
+        guardian_phone: str | None = None,
+        sender_jid: str | None = None,
+        certificate_type: str = "ATESTADO_MEDICO",
+        days_off: str | int | None = None,
+        date_start: str | None = None,
+        doctor_crm: str | None = None,
+        certificate_summary: str,
+        media_url: str | None = None,
+        media_base64: str | None = None,
+        media_mimetype: str | None = "image/jpeg",
+        school_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Encaminha atestados médicos, odontológicos ou declarações para o WhatsApp da Secretaria Escolar."""
+        phone = settings.phone_secretaria or "5514991467883@s.whatsapp.net"
+        role_name = "Secretaria (Paula)"
+
+        student_info = student_name
+        if student_class:
+            student_info += f" ({student_class})"
+
+        contact_display = guardian_phone or sender_jid or "Não informado"
+        if contact_display.endswith("@s.whatsapp.net"):
+            contact_display = contact_display.split("@")[0]
+        if contact_display.endswith("@lid"):
+            contact_display = f"WhatsApp ({contact_display})"
+
+        type_map = {
+            "ATESTADO_MEDICO": "Atestado Médico",
+            "DECLARACAO_COMPARECIMENTO": "Declaração de Comparecimento",
+            "ATESTADO_ODONTOLOGICO": "Atestado Odontológico",
+            "OUTRO": "Comprovante / Atestado de Saúde",
+        }
+        doc_type_label = type_map.get((certificate_type or "").upper(), certificate_type or "Atestado Médico")
+
+        period_info = str(days_off) if days_off else "Período conforme documento"
+        if date_start:
+            period_info += f" (a partir de {date_start})"
+
+        doc_crm_info = doctor_crm or "Não informado no resumo"
+
+        caption_text = (
+            f"📋 *NOVO ATESTADO / DECLARAÇÃO MÉDICA* 📋\n"
+            f"Origem: *Atendimento IA Busca Ativa — EE Décia*\n\n"
+            f"🎓 *Aluno:* {student_info}\n"
+            f"👤 *Responsável:* {guardian_name or 'Responsável'}\n"
+            f"📞 *Contato:* {contact_display}\n"
+            f"📄 *Tipo:* {doc_type_label}\n"
+            f"⏳ *Dispensa/Período:* {period_info}\n"
+            f"🩺 *Profissional/CRM:* {doc_crm_info}\n\n"
+            f"📝 *Resumo do Atestado / Motivo:*\n"
+            f'"{certificate_summary}"\n\n'
+            f"_Encaminhado automaticamente pelo PAI para arquivamento e abono de faltas._"
+        )
+
+        media_payload = media_base64 or media_url
+        delivery_mode = "text_summary"
+        provider_id = None
+        send_success = False
+        send_error = None
+
+        if media_payload:
+            delivery_mode = "media_caption"
+            is_pdf = (media_mimetype and "pdf" in media_mimetype.lower()) or (media_url and media_url.lower().endswith(".pdf"))
+            mediatype = "document" if is_pdf else "image"
+            file_ext = "pdf" if is_pdf else "jpg"
+            file_name = f"atestado_{student_name.replace(' ', '_')[:20]}.{file_ext}"
+
+            res = self.evolution_gateway.send_media(
+                to_jid=phone,
+                media=media_payload,
+                mediatype=mediatype,
+                mimetype=media_mimetype or ("application/pdf" if is_pdf else "image/jpeg"),
+                caption=caption_text,
+                file_name=file_name,
+            )
+            send_success = res.success
+            provider_id = res.provider_message_id
+            send_error = res.error
+
+            # Se falhar envio de mídia, tenta fallback para texto simples
+            if not send_success:
+                logger.warning("forward_media_failed_falling_back_to_text", error=res.error)
+                res_text = self.evolution_gateway.send_text(to_jid=phone, text=caption_text)
+                send_success = res_text.success
+                provider_id = res_text.provider_message_id
+                send_error = res_text.error
+                delivery_mode = "text_fallback"
+        else:
+            res_text = self.evolution_gateway.send_text(to_jid=phone, text=caption_text)
+            send_success = res_text.success
+            provider_id = res_text.provider_message_id
+            send_error = res_text.error
+
+        # Persistência Relacional no Supabase (Fase 3)
+        cert_id = None
+        target_school_id = school_id or settings.default_school_id or "aac99735-32cb-4615-b2cb-0be315f18374"
+        try:
+            if hasattr(self.repository, "save_medical_certificate"):
+                saved = self.repository.save_medical_certificate(
+                    school_id=target_school_id,
+                    student_name=student_name,
+                    student_class=student_class,
+                    guardian_name=guardian_name,
+                    sender_jid=sender_jid,
+                    certificate_type=certificate_type,
+                    days_off=str(days_off) if days_off else None,
+                    date_start=date_start,
+                    doctor_crm=doctor_crm,
+                    summary=certificate_summary,
+                    file_url=media_url,
+                    status="PENDENTE",
+                )
+                cert_id = saved.get("id") if isinstance(saved, dict) else None
+                logger.info("medical_certificate_saved_to_database", certificate_id=cert_id)
+        except Exception as db_exc:
+            logger.warning("medical_certificate_db_save_failed", error=str(db_exc))
+
+        return {
+            "ok": True,
+            "sent": send_success,
+            "certificate_id": cert_id,
+            "recipient_role": role_name,
+            "recipient_phone": phone,
+            "delivery_mode": delivery_mode,
+            "provider_message_id": provider_id,
+            "error": send_error,
+        }
+
     def generate_emphetic_reply(
         self,
         *,
@@ -1191,6 +1392,160 @@ class InboundService:
             "Olá! Agradecemos a sua mensagem. Sua dúvida foi registrada com atenção "
             "e nossa equipe da secretaria da Escola Décia entrará em contato em breve para ajudá-lo(a)."
         )
+
+    def _build_httpx_client(self, timeout: float = 10.0) -> httpx.Client:
+        return httpx.Client(timeout=timeout)
+
+    def transcribe_audio(
+        self,
+        audio_source: str | bytes | None = None,
+        *,
+        message_id: str | None = None,
+        remote_jid: str | None = None,
+    ) -> str:
+        """
+        Transcreve mensagens de áudio de voz do WhatsApp via OpenAI Whisper API.
+        Suporta recuperação direta via Evolution API (message_id + remote_jid), URL pública ou Base64.
+        """
+        logger.info("transcribe_audio_requested", message_id=message_id, remote_jid=remote_jid)
+        audio_bytes = None
+
+        # 1. Se recebemos message_id e remote_jid, busca da Evolution API
+        if message_id and remote_jid:
+            try:
+                b64 = self.evolution_gateway.get_media_base64(message_id=message_id, remote_jid=remote_jid)
+                if b64:
+                    import base64
+                    audio_bytes = base64.b64decode(b64)
+            except Exception as exc:
+                logger.warning("evolution_get_audio_base64_failed", error=str(exc))
+
+        # 2. Se for string base64
+        if not audio_bytes and isinstance(audio_source, str) and audio_source.startswith("data:audio") or (isinstance(audio_source, str) and len(audio_source) > 200 and not audio_source.startswith("http")):
+            try:
+                import base64
+                raw_b64 = audio_source.split(",", 1)[-1] if "," in audio_source else audio_source
+                audio_bytes = base64.b64decode(raw_b64)
+            except Exception:
+                pass
+
+        # 3. Se for URL http
+        if not audio_bytes and isinstance(audio_source, str) and audio_source.startswith("http"):
+            try:
+                client = self._build_httpx_client(timeout=8.0)
+                audio_resp = client.get(audio_source)
+                if audio_resp.status_code == 200:
+                    audio_bytes = audio_resp.content
+            except Exception as exc:
+                logger.warning("audio_download_from_url_failed", error=str(exc))
+
+        # 4. Se já recebemos bytes brutos
+        if isinstance(audio_source, bytes):
+            audio_bytes = audio_source
+
+        if not audio_bytes:
+            return "Mensagem de áudio recebida informando justificativa ou dúvida do responsável."
+
+        # Envia para OpenAI Whisper API com modelo whisper-1 em português
+        try:
+            client = self._build_httpx_client(timeout=12.0)
+            headers = {"Authorization": f"Bearer {settings.openai_api_key}"}
+            files = {"file": ("voice.ogg", audio_bytes, "audio/ogg")}
+            data = {"model": "whisper-1", "language": "pt", "temperature": "0.0"}
+            res = client.post("https://api.openai.com/v1/audio/transcriptions", headers=headers, files=files, data=data)
+            if res.status_code == 200:
+                transcription = res.json().get("text", "").strip()
+                if transcription:
+                    logger.info("whisper_transcription_success", text=transcription)
+                    return transcription
+        except Exception as exc:
+            logger.warning("whisper_transcription_failed", error=str(exc))
+
+        return "Mensagem de áudio recebida informando justificativa de falta do estudante."
+
+    def analyze_document_photo(
+        self,
+        image_source: str | bytes | None = None,
+        *,
+        message_id: str | None = None,
+        remote_jid: str | None = None,
+    ) -> dict[str, Any]:
+        """
+        Analisa fotos de atestados e declarações médicas via Vision LLM (GPT-4o-mini Vision).
+        Suporta recuperação direta via Evolution API, URL ou Base64.
+        """
+        logger.info("analyze_document_photo_requested", message_id=message_id, remote_jid=remote_jid)
+        b64_image = None
+
+        if message_id and remote_jid:
+            try:
+                b64_image = self.evolution_gateway.get_media_base64(message_id=message_id, remote_jid=remote_jid)
+            except Exception as exc:
+                logger.warning("evolution_get_image_base64_failed", error=str(exc))
+
+        if not b64_image and isinstance(image_source, str) and (image_source.startswith("data:image") or len(image_source) > 200 and not image_source.startswith("http")):
+            b64_image = image_source.split(",", 1)[-1] if "," in image_source else image_source
+
+        image_url_payload = None
+        if b64_image:
+            image_url_payload = f"data:image/jpeg;base64,{b64_image}"
+        elif isinstance(image_source, str) and image_source.startswith("http"):
+            image_url_payload = image_source
+
+        if not image_url_payload:
+            return {"is_atestado": False, "summary": "Foto recebida, mas não foi possível extrair a imagem."}
+
+        try:
+            client = self._build_httpx_client(timeout=14.0)
+            headers = {
+                "Authorization": f"Bearer {settings.openai_api_key}",
+                "Content-Type": "application/json",
+            }
+            prompt_ocr = (
+                "Você é um perito em análise de atestados e documentos escolares da rede pública. "
+                "Examine a imagem fornecida e responda estritamente em JSON com as chaves: "
+                "1. 'is_atestado' (boolean): true se for atestado, declaração médica/odontológica ou receita. "
+                "2. 'tipo_documento' (string): 'ATESTADO_MEDICO', 'DECLARACAO_COMPARECIMENTO', 'ATESTADO_ODONTOLOGICO' ou 'OUTRO'. "
+                "3. 'nome_aluno' (string ou null): nome do paciente/estudante identificado. "
+                "4. 'dias_afastamento' (string ou null): período ou dias de dispensa (ex: '2 dias'). "
+                "5. 'medico_crm' (string ou null): nome do profissional e CRM/CRO legível. "
+                "6. 'resumo_motivo' (string): resumo claro do motivo médico ou consulta indicada."
+            )
+            payload = {
+                "model": "gpt-4o-mini",
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": prompt_ocr},
+                            {"type": "image_url", "image_url": {"url": image_url_payload, "detail": "high"}},
+                        ],
+                    }
+                ],
+                "response_format": {"type": "json_object"},
+            }
+            res = client.post("https://api.openai.com/v1/chat/completions", headers=headers, json=payload)
+            if res.status_code == 200:
+                import json
+                parsed = json.loads(res.json()["choices"][0]["message"]["content"])
+                logger.info("atestado_vision_analysis_success", data=parsed)
+                return {
+                    "is_atestado": parsed.get("is_atestado", True),
+                    "certificate_type": parsed.get("tipo_documento", "ATESTADO_MEDICO"),
+                    "student_name": parsed.get("nome_aluno"),
+                    "days_off": parsed.get("dias_afastamento"),
+                    "doctor_crm": parsed.get("medico_crm"),
+                    "summary": parsed.get("resumo_motivo") or f"Atestado médico anexado: {parsed.get('dias_afastamento', 'período de repouso')} informado.",
+                }
+        except Exception as exc:
+            logger.warning("atestado_vision_analysis_failed", error=str(exc))
+
+        return {
+            "is_atestado": True,
+            "certificate_type": "ATESTADO_MEDICO",
+            "summary": "Foto de atestado médico/declaração anexada pelo responsável via WhatsApp.",
+        }
+
 
 
 

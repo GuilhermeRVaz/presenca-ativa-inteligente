@@ -114,7 +114,7 @@
       "main": [
         [
           {
-            "node": "Merge Branches",
+            "node": "Alertar Equipe Escolar",
             "type": "main",
             "index": 0
           }
@@ -296,6 +296,17 @@
           }
         ]
       ]
+    },
+    "Alertar Equipe Escolar": {
+      "main": [
+        [
+          {
+            "node": "Merge Branches",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
     }
   },
   "nodes": [
@@ -353,7 +364,7 @@
           ]
         },
         "options": {
-          "timeout": 5000
+          "timeout": 15000
         }
       },
       "settings": {
@@ -388,7 +399,7 @@
         "specifyBody": "json",
         "jsonBody": "={{ JSON.stringify({\n  school_id: $node[\"Webhook Chat\"].json.body?.school_id || $node[\"Webhook Chat\"].json.school_id,\n  sender_jid: $node[\"Webhook Chat\"].json.body?.sender_jid || $node[\"Webhook Chat\"].json.sender_jid,\n  message_text: $node[\"Webhook Chat\"].json.body?.message_text || $node[\"Webhook Chat\"].json.message_text || \"\",\n  student_name: $node[\"GET Session Context\"].json.student_name || null,\n  last_reason: $node[\"GET Session Context\"].json.last_reason || null,\n  campaign_name: $node[\"GET Session Context\"].json.campaign_name || null,\n  messages_history: $node[\"GET Session Context\"].json.messages || []\n}) }}",
         "options": {
-          "timeout": 5000
+          "timeout": 15000
         }
       },
       "retryOnFail": true,
@@ -457,7 +468,7 @@
         "specifyBody": "json",
         "jsonBody": "={{ JSON.stringify({\n  school_id: $node[\"Webhook Chat\"].json.body?.school_id || $node[\"Webhook Chat\"].json.school_id,\n  sender_jid: $node[\"Webhook Chat\"].json.body?.sender_jid || $node[\"Webhook Chat\"].json.sender_jid,\n  raw_message_id: ($node[\"Webhook Chat\"].json.body?.response_id || $node[\"Webhook Chat\"].json.response_id || $node[\"Webhook Chat\"].json.raw_message_id || $node[\"Webhook Chat\"].json.body?.raw_message_id || (\"n8n-\" + ($node[\"Webhook Chat\"].json.body?.sender_jid || $node[\"Webhook Chat\"].json.sender_jid || \"unknown\") + \"-\" + ($node[\"Webhook Chat\"].json.body?.received_at || $node[\"Webhook Chat\"].json.received_at || \"no-date\"))),\n  body: ($node[\"Webhook Chat\"].json.body?.message_text || $node[\"Webhook Chat\"].json.message_text || (($node[\"GET Session Context\"].json.messages || []).filter(m => m.text).slice(-1)[0]?.text) || \"[mensagem sem texto]\"),\n  student_id: $node[\"Webhook Chat\"].json.body?.student_id || $node[\"Webhook Chat\"].json.student_id || $node[\"GET Session Context\"].json.student_id || null,\n  campaign_id: $node[\"GET Session Context\"].json.campaign_id || null,\n  identity_confidence: \"HIGH\",\n  needs_review: true,\n  handoff_reason: $json.handoff_reason || \"handoff\",\n  detected_intent: $json.detected_intent || $json.intent || \"HUMANO\",\n  risk_level: $json.risk_level || \"LOW\",\n  received_at: $node[\"Webhook Chat\"].json.body?.received_at || $node[\"Webhook Chat\"].json.received_at\n}) }}",
         "options": {
-          "timeout": 5000
+          "timeout": 15000
         }
       },
       "retryOnFail": true,
@@ -497,7 +508,7 @@
         "specifyBody": "json",
         "jsonBody": "={{ JSON.stringify({\n  school_id: $node[\"Webhook Chat\"].json.body?.school_id || $node[\"Webhook Chat\"].json.school_id,\n  sender_jid: $node[\"Webhook Chat\"].json.body?.sender_jid || $node[\"Webhook Chat\"].json.sender_jid,\n  raw_message_id: ($node[\"Webhook Chat\"].json.body?.response_id || $node[\"Webhook Chat\"].json.response_id || $node[\"Webhook Chat\"].json.raw_message_id || $node[\"Webhook Chat\"].json.body?.raw_message_id || (\"n8n-\" + ($node[\"Webhook Chat\"].json.body?.sender_jid || $node[\"Webhook Chat\"].json.sender_jid || \"unknown\") + \"-\" + ($node[\"Webhook Chat\"].json.body?.received_at || $node[\"Webhook Chat\"].json.received_at || \"no-date\"))),\n  body: ($node[\"Webhook Chat\"].json.body?.message_text || $node[\"Webhook Chat\"].json.message_text || (($node[\"GET Session Context\"].json.messages || []).filter(m => m.text).slice(-1)[0]?.text) || \"[mensagem sem texto]\"),\n  student_id: $node[\"Webhook Chat\"].json.body?.student_id || $node[\"Webhook Chat\"].json.student_id || $node[\"GET Session Context\"].json.student_id || null,\n  campaign_id: $node[\"GET Session Context\"].json.campaign_id || null,\n  reason: $json.category === \"DOENCA\" ? \"ILLNESS\" : ($json.category === \"TRABALHO\" ? \"WORK\" : ($json.category === \"VIAGEM\" || $json.category === \"TRAVEL\" ? \"TRAVEL\" : ($json.category === \"TRANSPORTE\" ? \"SCHOOL_ISSUE\" : ($json.category === \"FAMILIA\" ? \"FAMILY\" : \"OTHER\")))),\n  ai_confidence: $json.confidence,\n  identity_confidence: \"HIGH\",\n  needs_review: false,\n  detected_intent: $json.intent || \"JUSTIFICATIVA_FALTA\",\n  risk_level: $json.risk_level || \"LOW\",\n  received_at: $node[\"Webhook Chat\"].json.body?.received_at || $node[\"Webhook Chat\"].json.received_at\n}) }}",
         "options": {
-          "timeout": 5000
+          "timeout": 15000
         }
       },
       "settings": {
@@ -532,7 +543,7 @@
         "specifyBody": "json",
         "jsonBody": "={{ JSON.stringify({\n  school_id: $node[\"Webhook Chat\"].json.body?.school_id || $node[\"Webhook Chat\"].json.school_id,\n  sender_jid: $node[\"Webhook Chat\"].json.body?.sender_jid || $node[\"Webhook Chat\"].json.sender_jid,\n  push_name: $node[\"Webhook Chat\"].json.body?.push_name || $node[\"Webhook Chat\"].json.push_name || \"\",\n  message_text: $node[\"Webhook Chat\"].json.body?.message_text || $node[\"Webhook Chat\"].json.message_text || \"\",\n  student_name: $node[\"GET Session Context\"].json.student_name || null,\n  category: $node[\"Parse Classificador Segura\"].json.category || null,\n  last_reason: $node[\"GET Session Context\"].json.last_reason || null,\n  messages_history: $node[\"GET Session Context\"].json.messages || []\n}) }}",
         "options": {
-          "timeout": 5000
+          "timeout": 15000
         }
       },
       "settings": {
@@ -582,7 +593,7 @@
         },
         "options": {
           "continueOnFail": true,
-          "timeout": 5000
+          "timeout": 15000
         }
       },
       "settings": {
@@ -631,7 +642,7 @@
         "specifyBody": "json",
         "jsonBody": "={{ JSON.stringify({\n  message_text: $node[\"Webhook Chat\"].json.body?.message_text || $node[\"Webhook Chat\"].json.message_text || \"\",\n  rag_context: $node[\"Agrupar RAG\"].json.results || []\n}) }}",
         "options": {
-          "timeout": 5000
+          "timeout": 15000
         }
       },
       "settings": {
@@ -686,7 +697,7 @@
         "jsonBody": "={{ JSON.stringify({\n  school_id: $node[\"Webhook Chat\"].json.body?.school_id || $node[\"Webhook Chat\"].json.school_id,\n  sender_jid: $node[\"Webhook Chat\"].json.body?.sender_jid || $node[\"Webhook Chat\"].json.sender_jid,\n  raw_message_id: ($node[\"Webhook Chat\"].json.body?.response_id || $node[\"Webhook Chat\"].json.response_id || $node[\"Webhook Chat\"].json.raw_message_id || $node[\"Webhook Chat\"].json.body?.raw_message_id || (\"n8n-\" + ($node[\"Webhook Chat\"].json.body?.sender_jid || $node[\"Webhook Chat\"].json.sender_jid || \"unknown\") + \"-\" + ($node[\"Webhook Chat\"].json.body?.received_at || $node[\"Webhook Chat\"].json.received_at || \"no-date\"))),\n  body: ($node[\"Webhook Chat\"].json.body?.message_text || $node[\"Webhook Chat\"].json.message_text || (($node[\"GET Session Context\"].json.messages || []).filter(m => m.text).slice(-1)[0]?.text) || \"[mensagem sem texto]\"),\n  student_id: $node[\"Webhook Chat\"].json.body?.student_id || $node[\"Webhook Chat\"].json.student_id || $node[\"GET Session Context\"].json.student_id || null,\n  campaign_id: $node[\"GET Session Context\"].json.campaign_id || null,\n  identity_confidence: \"HIGH\",\n  needs_review: false,\n  handoff_reason: \"cortesia\",\n  detected_intent: $node[\"Parse Classificador Segura\"].json.intent || \"SAUDACAO\",\n  risk_level: \"LOW\",\n  received_at: $node[\"Webhook Chat\"].json.body?.received_at || $node[\"Webhook Chat\"].json.received_at\n}) }}",
         "options": {
           "continueOnFail": true,
-          "timeout": 5000
+          "timeout": 15000
         }
       },
       "settings": {
@@ -726,7 +737,7 @@
         "specifyBody": "json",
         "jsonBody": "={{ JSON.stringify({\n  school_id: $node[\"Webhook Chat\"].json.body?.school_id || $node[\"Webhook Chat\"].json.school_id,\n  sender_jid: $node[\"Webhook Chat\"].json.body?.sender_jid || $node[\"Webhook Chat\"].json.sender_jid,\n  raw_message_id: ($node[\"Webhook Chat\"].json.body?.response_id || $node[\"Webhook Chat\"].json.response_id || $node[\"Webhook Chat\"].json.raw_message_id || $node[\"Webhook Chat\"].json.body?.raw_message_id || (\"n8n-\" + ($node[\"Webhook Chat\"].json.body?.sender_jid || $node[\"Webhook Chat\"].json.sender_jid || \"unknown\") + \"-\" + ($node[\"Webhook Chat\"].json.body?.received_at || $node[\"Webhook Chat\"].json.received_at || \"no-date\"))),\n  body: ($node[\"Webhook Chat\"].json.body?.message_text || $node[\"Webhook Chat\"].json.message_text || (($node[\"GET Session Context\"].json.messages || []).filter(m => m.text).slice(-1)[0]?.text) || \"[mensagem sem texto]\"),\n  student_id: $node[\"Webhook Chat\"].json.body?.student_id || $node[\"Webhook Chat\"].json.student_id || $node[\"GET Session Context\"].json.student_id || null,\n  campaign_id: $node[\"GET Session Context\"].json.campaign_id || null,\n  identity_confidence: \"HIGH\",\n  needs_review: true,\n  handoff_reason: \"desconhecido\",\n  detected_intent: \"DESCONHECIDO\",\n  risk_level: \"LOW\",\n  received_at: $node[\"Webhook Chat\"].json.body?.received_at || $node[\"Webhook Chat\"].json.received_at\n}) }}",
         "options": {
-          "timeout": 5000
+          "timeout": 15000
         }
       },
       "retryOnFail": true,
@@ -766,7 +777,7 @@
         "specifyBody": "json",
         "jsonBody": "={{ JSON.stringify({\n  response_id: (() => { const rid = $json.response_id || null; return /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/.test(String(rid || \"\")) ? rid : null; })(),\n  student_id: (() => { const sid = $json.student_id || $node[\"GET Session Context\"].json.student_id || null; return /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/.test(String(sid || \"\")) ? sid : null; })(),\n  prompt_version: $json.prompt_version || \"\",\n  model: $json.model || \"\",\n  input_text: $node[\"Webhook Chat\"].json.body?.message_text || $node[\"Webhook Chat\"].json.message_text || \"\",\n  output_text: $json.response_text || \"\",\n  classified_reason: $json.detected_intent || \"\",\n  risk_level: $json.risk_level || \"\"\n}) }}",
         "options": {
-          "timeout": 5000
+          "timeout": 15000
         }
       },
       "retryOnFail": true,
@@ -805,7 +816,7 @@
         "specifyBody": "json",
         "jsonBody": "={{ JSON.stringify({\n  number: (($node[\"GET Session Context\"].json.reply_to_jid || $node[\"GET Session Context\"].json.wa_jid || $node[\"Webhook Chat\"].json.body?.sender_jid || $node[\"Webhook Chat\"].json.sender_jid || \"\").endsWith('@lid')) ?\n          ($node[\"GET Session Context\"].json.reply_to_jid || $node[\"GET Session Context\"].json.wa_jid || $node[\"Webhook Chat\"].json.body?.sender_jid || $node[\"Webhook Chat\"].json.sender_jid || \"\") :\n          ($node[\"GET Session Context\"].json.reply_to_jid || $node[\"GET Session Context\"].json.wa_jid || $node[\"Webhook Chat\"].json.body?.sender_jid || $node[\"Webhook Chat\"].json.sender_jid || \"\").split('@')[0],\n  text: $node[\"Consolidar Contexto\"].json.response_text\n}) }}",
         "options": {
-          "timeout": 5000
+          "timeout": 15000
         }
       },
       "retryOnFail": true,
@@ -843,6 +854,41 @@
       "parameters": {
         "respondWith": "firstIncomingItem"
       }
+    },
+    {
+      "id": "e6a2b89c-4f10-4d56-9812-7890abcdef01",
+      "name": "Alertar Equipe Escolar",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        2016,
+        0
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "http://host.docker.internal:8000/inbound/staff_alert",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({\n  target_role: ($json.detected_intent === 'DUVIDA_SECRETARIA' ? 'SECRETARIA' : ($json.risk_level === 'HIGH' ? 'DIRETOR' : 'VICE_DIRETOR')),\n  student_name: $node[\"GET Session Context\"].json.student_name || null,\n  guardian_name: $node[\"Webhook Chat\"].json.body?.push_name || $node[\"Webhook Chat\"].json.push_name || \"Responsável\",\n  guardian_phone: $node[\"Webhook Chat\"].json.body?.sender_jid || $node[\"Webhook Chat\"].json.sender_jid,\n  alert_reason: $json.handoff_reason || $json.detected_intent || \"Solicitação de Atendimento\",\n  message_summary: $node[\"Webhook Chat\"].json.body?.message_text || $node[\"Webhook Chat\"].json.message_text || \"[mensagem sem texto]\",\n  school_id: $node[\"Webhook Chat\"].json.body?.school_id || $node[\"Webhook Chat\"].json.school_id\n}) }}",
+        "options": {
+          "timeout": 15000
+        }
+      },
+      "settings": {
+        "onError": "continueRegularOutput"
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 1000
     }
   ],
   "activeVersion": {

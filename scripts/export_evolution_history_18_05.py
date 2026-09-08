@@ -30,16 +30,20 @@ def is_confirmation(text: str) -> bool:
 
 
 def extract_text(msg: dict) -> str:
-    m = msg.get("message", {})
-    if "conversation" in m:
-        return m["conversation"]
+    m = msg.get("message") or {}
+    if not isinstance(m, dict):
+        return ""
+    if "conversation" in m and m["conversation"]:
+        return str(m["conversation"])
     if "extendedTextMessage" in m:
-        return m.get("extendedTextMessage", {}).get("text", "")
+        ext = m.get("extendedTextMessage") or {}
+        if isinstance(ext, dict):
+            return str(ext.get("text") or "")
     if "audioMessage" in m:
         return "[AUDIO]"
     if "imageMessage" in m:
         return "[IMAGEM]"
-    return msg.get("conversation", "")
+    return str(msg.get("conversation") or "")
 
 
 def fetch_conversation(jid: str, limit: int = 50):

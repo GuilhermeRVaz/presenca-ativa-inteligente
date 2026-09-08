@@ -103,11 +103,15 @@ def run():
             key = msg.get("key", {})
             
             content = ""
-            m = msg.get("message", {})
-            if "conversation" in m: content = m["conversation"]
-            elif "extendedTextMessage" in m: content = m.get("extendedTextMessage", {}).get("text", "")
-            elif "imageMessage" in m: content = "[IMAGEM]"
-            elif "audioMessage" in m: content = "[AUDIO]"
+            m = msg.get("message") or {}
+            if isinstance(m, dict):
+                if "conversation" in m: content = m["conversation"] or ""
+                elif "extendedTextMessage" in m:
+                    ext = m.get("extendedTextMessage") or {}
+                    if isinstance(ext, dict):
+                        content = ext.get("text", "")
+                elif "imageMessage" in m: content = "[IMAGEM]"
+                elif "audioMessage" in m: content = "[AUDIO]"
             
             if not content and "conversation" in msg: content = msg["conversation"]
             if not content: continue

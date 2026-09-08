@@ -28,6 +28,11 @@ import pandas as pd
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
+if sys.platform.startswith("win"):
+    import io
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace", line_buffering=True)
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace", line_buffering=True)
+
 from app.core.config import settings
 from app.core.logging import logger
 from app.infrastructure.message_catalog import MessageCatalog
@@ -36,6 +41,22 @@ from app.infrastructure.message_catalog import MessageCatalog
 
 # Colunas mínimas esperadas no Excel consolidado
 REQUIRED_COLS = {"RA", "NOME"}
+
+
+def _resolve_latest_report_path(configured_path: str) -> Path:
+    path = Path(configured_path)
+    if path.name == "Relatorio_Consolidado_BuscaAtiva.xlsx" and path.parent.exists():
+        timestamped_files = sorted(
+            path.parent.glob("Relatorio_Consolidado_BuscaAtiva_20*.xlsx"),
+            key=lambda p: p.stat().st_mtime,
+            reverse=True
+        )
+        if timestamped_files:
+            latest_timestamped = timestamped_files[0]
+            if not path.exists() or latest_timestamped.stat().st_mtime > path.stat().st_mtime:
+                logger.info("Usando o relatório consolidado mais recente", path=str(latest_timestamped))
+                return latest_timestamped
+    return path
 
 
 # ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -129,10 +150,13 @@ def _resolve_student_uuid(client, school_id: str, ra: str, name: str) -> str | N
     """
     Resolve o UUID do aluno:
       1. Busca pelo RA (exato) — mais confiável
-      2. Fallback por Nome exato
+      2. Busca pelo núcleo de dígitos do RA (sem zeros à esquerda e dígito verificador)
+      3. Fallback por Nome exato e case-insensitive (ilike)
     Retorna None se não encontrado.
     """
-    # Tentativa 1: por RA
+    import re
+    
+    # Tentativa 1: por RA exato
     ra_clean = str(ra).strip()
     if ra_clean and ra_clean.lower() not in ("nan", "none", ""):
         operation = lambda: (
@@ -148,7 +172,31 @@ def _resolve_student_uuid(client, school_id: str, ra: str, name: str) -> str | N
         if res.data:
             return str(res.data[0]["id"])
 
-    # Tentativa 2: por Nome
+        # Tentativa 2: por dígitos extraídos do RA
+        digits = re.sub(r"\D", "", ra_clean)
+        candidates = []
+        if digits:
+            stripped = digits.lstrip("0")
+            if stripped:
+                candidates.append(stripped)
+                if len(stripped) >= 9:
+                    candidates.append(stripped[:-1])
+        
+        for cand in candidates:
+            op_cand = lambda c=cand: (
+                client.schema("busca_ativa_v2")
+                .table("students")
+                .select("id")
+                .eq("school_id", school_id)
+                .eq("ra", c)
+                .limit(1)
+                .execute()
+            )
+            res_c = _execute_with_retry(op_cand, operation="resolve_student_by_ra_digits")
+            if res_c.data:
+                return str(res_c.data[0]["id"])
+
+    # Tentativa 3: por Nome exato / ilike
     name_clean = str(name).strip()
     if name_clean and name_clean.lower() not in ("nan", "none", ""):
         operation = lambda: (
@@ -156,7 +204,7 @@ def _resolve_student_uuid(client, school_id: str, ra: str, name: str) -> str | N
             .table("students")
             .select("id")
             .eq("school_id", school_id)
-            .eq("name", name_clean)
+            .ilike("name", name_clean)
             .limit(1)
             .execute()
         )
@@ -359,7 +407,7 @@ def load_campaign(
         raise RuntimeError("DEFAULT_SCHOOL_ID não configurado no .env")
 
     # ── 1. Ler Excel ──────────────────────────────────────────────────────────
-    path = Path(report_path)
+    path = _resolve_latest_report_path(report_path)
     if not path.exists():
         raise FileNotFoundError(f"Relatório não encontrado: {report_path}")
 

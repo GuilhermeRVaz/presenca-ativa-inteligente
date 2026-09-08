@@ -1425,6 +1425,113 @@ class SupabaseRepository:
             f"Supabase {operation} failed after {attempts} attempts: {last_error!r}"
         ) from last_error
 
+    def save_medical_certificate(
+        self,
+        *,
+        school_id: str,
+        student_name: str,
+        summary: str,
+        student_id: str | None = None,
+        guardian_id: str | None = None,
+        sender_jid: str | None = None,
+        student_class: str | None = None,
+        guardian_name: str | None = None,
+        certificate_type: str = "ATESTADO_MEDICO",
+        days_off: str | None = None,
+        date_start: str | None = None,
+        doctor_crm: str | None = None,
+        storage_path: str | None = None,
+        file_url: str | None = None,
+        status: str = "PENDENTE",
+    ) -> dict[str, Any]:
+        """Salva o atestado médico ou declaração na tabela busca_ativa_v2.medical_certificates."""
+        payload = {
+            "school_id": school_id,
+            "student_name": student_name,
+            "summary": summary,
+            "student_id": student_id,
+            "guardian_id": guardian_id,
+            "sender_jid": sender_jid,
+            "student_class": student_class,
+            "guardian_name": guardian_name,
+            "certificate_type": certificate_type,
+            "days_off": days_off,
+            "date_start": date_start,
+            "doctor_crm": doctor_crm,
+            "storage_path": storage_path,
+            "file_url": file_url,
+            "status": status,
+        }
+        # Remove chaves com None se necessário ou envia direto
+        clean_payload = {k: v for k, v in payload.items() if v is not None}
+
+        def operation():
+            return (
+                self.client.schema("busca_ativa_v2")
+                .table("medical_certificates")
+                .insert(clean_payload)
+                .execute()
+            )
+
+        res = self._execute_with_retry(operation, operation="save_medical_certificate")
+        return res.data[0] if res.data else clean_payload
+
+    def list_medical_certificates(
+        self,
+        *,
+        school_id: str,
+        status: str | None = None,
+        student_id: str | None = None,
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        """Lista atestados médicos com filtros por escola, status ou aluno."""
+        query = (
+            self.client.schema("busca_ativa_v2")
+            .table("medical_certificates")
+            .select("*")
+            .order("created_at", desc=True)
+            .limit(limit)
+        )
+        if school_id and school_id != "school-1":
+            query = query.eq("school_id", school_id)
+        if status:
+            query = query.eq("status", status.upper())
+        if student_id:
+            query = query.eq("student_id", student_id)
+
+        def operation():
+            return query.execute()
+
+        res = self._execute_with_retry(operation, operation="list_medical_certificates")
+        return res.data or []
+
+    def update_medical_certificate_status(
+        self,
+        *,
+        certificate_id: str,
+        status: str,
+        homologated_by: str = "Secretaria Escolar",
+    ) -> dict[str, Any] | None:
+        """Atualiza o status de homologação de um atestado médico."""
+        from datetime import datetime, timezone
+        payload = {
+            "status": status.upper(),
+            "homologated_by": homologated_by,
+            "homologated_at": datetime.now(timezone.utc).isoformat(),
+        }
+
+        def operation():
+            return (
+                self.client.schema("busca_ativa_v2")
+                .table("medical_certificates")
+                .update(payload)
+                .eq("id", certificate_id)
+                .execute()
+            )
+
+        res = self._execute_with_retry(operation, operation="update_medical_certificate_status")
+        return res.data[0] if res.data else None
+
     @staticmethod
     def _parse_datetime(value: Any) -> datetime | None:
         if value is None:
@@ -1440,3 +1547,4 @@ class SupabaseRepository:
             return datetime.fromisoformat(text)
         except ValueError:
             return None
+

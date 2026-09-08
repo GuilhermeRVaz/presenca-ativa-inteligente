@@ -106,13 +106,54 @@ def clean_text(value: str | None) -> str:
     text = re.sub(r"<Mensagem editada>", "", str(value or ""), flags=re.IGNORECASE)
     return re.sub(r"\s+", " ", text).strip()
 
-def _evo_extract_text(msg: dict) -> str:
-    """Extrai texto de uma mensagem da Evolution API."""
-    m = msg.get("message", {})
-    if "conversation" in m:
-        return m["conversation"] or ""
+def _evo_extract_text(msg: dict | None) -> str:
+    """Extrai texto de uma mensagem da Evolution API de forma defensiva."""
+    if not isinstance(msg, dict):
+        return ""
+    m = msg.get("message")
+    if not isinstance(m, dict):
+        return ""
+
+    if isinstance(m.get("ephemeralMessage"), dict):
+        m = m["ephemeralMessage"].get("message") or {}
+    elif isinstance(m.get("viewOnceMessage"), dict):
+        m = m["viewOnceMessage"].get("message") or {}
+    elif isinstance(m.get("viewOnceMessageV2"), dict):
+        m = m["viewOnceMessageV2"].get("message") or {}
+
+    if not isinstance(m, dict):
+        return ""
+
+    if "conversation" in m and m["conversation"]:
+        return str(m["conversation"])
     if "extendedTextMessage" in m:
-        return m.get("extendedTextMessage", {}).get("text", "")
+        ext = m.get("extendedTextMessage")
+        if isinstance(ext, dict):
+            return str(ext.get("text") or "")
+    if "imageMessage" in m:
+        img = m.get("imageMessage")
+        if isinstance(img, dict):
+            return str(img.get("caption") or "")
+    if "videoMessage" in m:
+        vid = m.get("videoMessage")
+        if isinstance(vid, dict):
+            return str(vid.get("caption") or "")
+    if "documentMessage" in m:
+        doc = m.get("documentMessage")
+        if isinstance(doc, dict):
+            return str(doc.get("caption") or "")
+    if "buttonsResponseMessage" in m:
+        btn = m.get("buttonsResponseMessage")
+        if isinstance(btn, dict):
+            return str(btn.get("selectedDisplayText") or btn.get("selectedButtonId") or "")
+    if "listResponseMessage" in m:
+        lst = m.get("listResponseMessage")
+        if isinstance(lst, dict):
+            return str(lst.get("title") or "")
+    if "templateButtonReplyMessage" in m:
+        tbl = m.get("templateButtonReplyMessage")
+        if isinstance(tbl, dict):
+            return str(tbl.get("selectedDisplayText") or tbl.get("selectedId") or "")
     return ""
 
 def _evo_is_confirmation(text: str) -> bool:
@@ -127,7 +168,13 @@ def _evo_fetch_conversation(jid: str, limit: int = 50) -> list[dict]:
     try:
         r = requests.post(url, json=payload, headers=EVO_HEADERS, timeout=15)
         if r.status_code == 200:
-            return r.json().get("messages", {}).get("records", [])
+            res = r.json()
+            if isinstance(res, dict):
+                msgs = res.get("messages")
+                if isinstance(msgs, dict):
+                    records = msgs.get("records")
+                    if isinstance(records, list):
+                        return records
     except Exception:
         pass
     return []
@@ -161,6 +208,8 @@ def _evo_scan_jid(jid: str, target_date: date) -> tuple[list[dict], list[dict]]:
     escola = []
     pai = []
     for msg in records:
+        if not isinstance(msg, dict):
+            continue
         msg_dt = _parse_evo_timestamp(msg.get("messageTimestamp", 0))
         if not msg_dt:
             continue
@@ -170,7 +219,9 @@ def _evo_scan_jid(jid: str, target_date: date) -> tuple[list[dict], list[dict]]:
         if not text:
             continue
         entry = {"dt": msg_dt, "time": msg_dt.strftime("%H:%M"), "text": text}
-        if msg.get("key", {}).get("fromMe"):
+        key = msg.get("key")
+        from_me = key.get("fromMe") if isinstance(key, dict) else False
+        if from_me:
             escola.append(entry)
         else:
             pai.append(entry)

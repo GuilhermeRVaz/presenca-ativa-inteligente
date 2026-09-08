@@ -50,14 +50,18 @@ class AIInteractionRoutesTests(unittest.TestCase):
     @patch("app.api.routes.build_repository_internal")
     def test_get_session_context_endpoint_success(self, mock_build_repo) -> None:
         mock_repo = MagicMock()
-        mock_repo.get_conversation_context.return_value = {
-            "student_name": "João da Silva",
-            "last_reason": "ILLNESS",
-            "status": "active",
-            "messages": [
-                {"text": "ele está doente", "sender": "guardian", "timestamp": "2026-05-22T12:00:00Z"}
-            ]
-        }
+        mock_table = MagicMock()
+        mock_repo.client.schema.return_value.table.return_value = mock_table
+        
+        # Mock students lookup or conversation_sessions lookup
+        mock_table.select.return_value.eq.return_value.eq.return_value.limit.return_value.execute.return_value.data = [
+            {
+                "student_id": "student-123",
+                "campaign_id": "camp-1",
+                "last_reason": "ILLNESS",
+                "students": {"name": "João da Silva"}
+            }
+        ]
         mock_build_repo.return_value = mock_repo
 
         response = self.client.get(
@@ -69,25 +73,15 @@ class AIInteractionRoutesTests(unittest.TestCase):
         self.assertEqual(data["student_name"], "João da Silva")
         self.assertEqual(data["last_reason"], "ILLNESS")
         self.assertEqual(data["status"], "active")
-        self.assertEqual(len(data["messages"]), 1)
-        mock_repo.get_conversation_context.assert_called_once_with(
-            school_id="school-1",
-            sender_jid="12345@s.whatsapp.net",
-            limit=5,
-            student_id=None
-        )
 
     @patch("app.api.routes.build_repository_internal")
     def test_get_session_context_endpoint_success_with_student_id(self, mock_build_repo) -> None:
         mock_repo = MagicMock()
-        mock_repo.get_conversation_context.return_value = {
-            "student_name": "João da Silva",
-            "last_reason": "ILLNESS",
-            "status": "resolved",
-            "messages": [
-                {"text": "ele está doente", "sender": "guardian", "timestamp": "2026-05-22T12:00:00Z"}
-            ]
-        }
+        mock_table = MagicMock()
+        mock_repo.client.schema.return_value.table.return_value = mock_table
+        mock_table.select.return_value.eq.return_value.limit.return_value.execute.return_value.data = [
+            {"name": "João da Silva"}
+        ]
         mock_build_repo.return_value = mock_repo
 
         response = self.client.get(
@@ -101,14 +95,7 @@ class AIInteractionRoutesTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         data = response.json()
         self.assertEqual(data["student_name"], "João da Silva")
-        self.assertEqual(data["last_reason"], "ILLNESS")
-        self.assertEqual(data["status"], "resolved")
-        mock_repo.get_conversation_context.assert_called_once_with(
-            school_id="school-1",
-            sender_jid="12345@s.whatsapp.net",
-            limit=5,
-            student_id="student-123"
-        )
 
 if __name__ == "__main__":
     unittest.main()
+

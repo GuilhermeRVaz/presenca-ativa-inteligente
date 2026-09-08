@@ -291,3 +291,27 @@ def test_regression_june_10_campaign_group() -> None:
     assert report.risk.high_risk == 8
 
 
+def test_evo_extract_text_handles_null_and_malformed_messages() -> None:
+    from scripts.consolidate_campaign_report import _evo_extract_text
+
+    # Mensagens com "message": None (como no erro relatado)
+    assert _evo_extract_text({"key": {"id": "123"}, "message": None}) == ""
+
+    # Mensagens sem a chave "message"
+    assert _evo_extract_text({"key": {"id": "123"}}) == ""
+
+    # Objetos que não são dicionários
+    assert _evo_extract_text(None) == ""
+    assert _evo_extract_text("string_inválida") == ""
+
+    # Mensagens com extendedTextMessage mas text nulo ou dict malformado
+    assert _evo_extract_text({"message": {"extendedTextMessage": None}}) == ""
+    assert _evo_extract_text({"message": {"extendedTextMessage": {"text": None}}}) == ""
+    assert _evo_extract_text({"message": {"extendedTextMessage": {"text": "Olá mundo"}}}) == "Olá mundo"
+
+    # Mensagem de conversa simples
+    assert _evo_extract_text({"message": {"conversation": "Bom dia"}}) == "Bom dia"
+    assert _evo_extract_text({"message": {"conversation": None}}) == ""
+
+
+

@@ -90,6 +90,74 @@ class EvolutionGateway:
             "chat/sendPresence", payload, max_retries=max_retries, retry_delay=retry_delay, extract_id=False
         )
 
+    def send_media(
+        self,
+        *,
+        to_jid: str,
+        media: str,
+        mediatype: str = "image",
+        mimetype: str = "image/jpeg",
+        caption: str = "",
+        file_name: str = "documento.jpg",
+        dry_run: bool = False,
+        max_retries: int = 3,
+        retry_delay: float = 3.0,
+    ) -> SendResult:
+        """Envia imagens ou documentos (PDF) via Evolution API com caption rico."""
+        if to_jid.endswith("@lid"):
+            phone = to_jid
+        else:
+            phone = to_jid.split("@", 1)[0]
+
+        if dry_run:
+            return SendResult(success=True, provider_message_id=None, mock=True)
+
+        self._validate_config()
+        payload = {
+            "number": phone,
+            "mediatype": mediatype,
+            "mimetype": mimetype,
+            "caption": caption,
+            "media": media,
+            "fileName": file_name,
+        }
+        return self._post_with_retry(
+            "message/sendMedia", payload, max_retries=max_retries, retry_delay=retry_delay, extract_id=True
+        )
+
+    def get_media_base64(
+        self,
+        *,
+        message_id: str,
+        remote_jid: str,
+        from_me: bool = False,
+        timeout: float = 12.0,
+    ) -> str | None:
+        """Recupera os dados base64 de uma mensagem de mídia (áudio ou imagem) da Evolution API."""
+        self._validate_config()
+        url = self._send_url("chat/getBase64FromMediaMessage")
+        payload = {
+            "message": {
+                "key": {
+                    "id": message_id,
+                    "remoteJid": remote_jid,
+                    "fromMe": from_me,
+                }
+            },
+            "convertToMp4": False,
+        }
+        try:
+            with httpx.Client(timeout=timeout) as client:
+                resp = client.post(url, headers=self._headers(), json=payload)
+                if resp.status_code == 200:
+                    data = resp.json()
+                    b64 = data.get("base64")
+                    if b64 and isinstance(b64, str):
+                        return b64
+        except Exception:
+            pass
+        return None
+
     def _post_with_retry(
         self,
         endpoint_path: str,

@@ -448,10 +448,96 @@ def render_quick_create() -> None:
     st.success(f"Cadastro salvo: {saved['name']} | RA {saved['ra']}")
 
 
+def render_medical_certificates_management() -> None:
+    st.subheader("📋 Gestão de Atestados Médicos & Declarações")
+    st.caption("Acompanhamento, auditoria e homologação de atestados recebidos pelo WhatsApp.")
+
+    sid = school_id()
+    col_f1, col_f2 = st.columns([1, 2])
+    with col_f1:
+        status_filter = st.selectbox(
+            "Filtrar por Status:",
+            ["TODOS", "PENDENTE", "HOMOLOGADO", "REJEITADO"],
+            index=0
+        )
+    with col_f2:
+        search_student = st.text_input("Buscar por Aluno ou Médico:", placeholder="Digite o nome...")
+
+    query = db().table("medical_certificates").select("*").eq("school_id", sid).order("created_at", desc=True)
+    if status_filter != "TODOS":
+        query = query.eq("status", status_filter)
+    if search_student.strip():
+        query = query.ilike("student_name", f"%{search_student.strip()}%")
+
+    res = query.limit(50).execute()
+    certs = res.data or []
+
+    if not certs:
+        st.info("Nenhum atestado médico ou declaração encontrado com os filtros selecionados.")
+        return
+
+    st.write(f"Total encontrado: **{len(certs)}** atestados.")
+
+    for c in certs:
+        cid = c.get("id")
+        s_name = c.get("student_name") or "Aluno não informado"
+        s_class = c.get("student_class") or "Turma não informada"
+        g_name = c.get("guardian_name") or "Responsável"
+        c_type = c.get("certificate_type") or "ATESTADO_MEDICO"
+        days = c.get("days_off") or "Conforme documento"
+        doc = c.get("doctor_crm") or "Não informado"
+        summary = c.get("summary") or ""
+        status_val = c.get("status") or "PENDENTE"
+        created = (c.get("created_at") or "")[:10]
+
+        status_colors = {
+            "PENDENTE": "orange",
+            "HOMOLOGADO": "green",
+            "REJEITADO": "red"
+        }
+        color = status_colors.get(status_val, "gray")
+
+        with st.expander(f"🩺 **{s_name}** ({s_class}) — Status: :{color}[{status_val}] — {created}"):
+            col1, col2 = st.columns([2, 1])
+            with col1:
+                st.markdown(f"**Tipo de Documento:** {c_type}")
+                st.markdown(f"**Responsável:** {g_name}")
+                st.markdown(f"**Período de Afastamento:** {days}")
+                st.markdown(f"**Médico / CRM:** {doc}")
+                st.markdown(f"**Resumo do Atestado:** *\"{summary}\"*")
+                if c.get("file_url"):
+                    st.markdown(f"[📎 Abrir Imagem/Documento do Atestado]({c.get('file_url')})")
+            with col2:
+                st.markdown(f"**Status Atual:** `{status_val}`")
+                if c.get("homologated_by"):
+                    st.caption(f"Homologado por: {c.get('homologated_by')} em {c.get('homologated_at')}")
+
+                if status_val == "PENDENTE":
+                    if st.button("✅ Homologar Falta", key=f"btn_hom_{cid}"):
+                        from datetime import datetime, timezone
+                        db().table("medical_certificates").update({
+                            "status": "HOMOLOGADO",
+                            "homologated_by": "Secretaria (Painel)",
+                            "homologated_at": datetime.now(timezone.utc).isoformat()
+                        }).eq("id", cid).execute()
+                        st.success("Atestado homologado com sucesso!")
+                        st.rerun()
+
+                    if st.button("❌ Rejeitar / Ilegível", key=f"btn_rej_{cid}"):
+                        from datetime import datetime, timezone
+                        db().table("medical_certificates").update({
+                            "status": "REJEITADO",
+                            "homologated_by": "Secretaria (Painel)",
+                            "homologated_at": datetime.now(timezone.utc).isoformat()
+                        }).eq("id", cid).execute()
+                        st.warning("Atestado marcado como rejeitado.")
+                        st.rerun()
+
+
 def main() -> None:
     st.set_page_config(page_title="CRUD Supabase - PAI", layout="wide")
     st.title("CRUD Supabase - Presenca Ativa")
-    st.caption("Edicao manual de alunos, responsaveis, vinculos e contatos legados.")
+    st.caption("Edicao manual de alunos, responsaveis, vinculos e gestao de atestados medicos.")
 
     try:
         st.sidebar.success(f"Escola: {school_id()}")
@@ -459,7 +545,7 @@ def main() -> None:
         st.error(str(exc))
         st.stop()
 
-    tab_search, tab_create = st.tabs(["Buscar e editar", "Cadastro rapido"])
+    tab_search, tab_create, tab_certs = st.tabs(["Buscar e editar", "Cadastro rapido", "📋 Gestão de Atestados"])
     with tab_search:
         selected = render_student_picker()
         edited = render_student_form(selected) if selected else None
@@ -469,7 +555,10 @@ def main() -> None:
                 st.json(get_legacy_contact(edited["ra"]) or {})
     with tab_create:
         render_quick_create()
+    with tab_certs:
+        render_medical_certificates_management()
 
 
 if __name__ == "__main__":
     main()
+

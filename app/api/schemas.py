@@ -136,16 +136,15 @@ class AIInteractionResponse(BaseModel):
 
 
 class StaffAlertRequest(BaseModel):
-    """Payload para disparar alerta WhatsApp para a equipe escolar (Junior, Paula, Anderson, Lucimara)."""
-    target_role: str = Field(..., description="Papel do destinatário: DIRETOR, SECRETARIA, VICE_DIRETOR, COORDENACAO")
-    student_name: str | None = Field(None, description="Nome do aluno")
-    student_class: str | None = Field(None, description="Turma do aluno")
-    guardian_name: str | None = Field(None, description="Nome do responsável")
-    guardian_phone: str | None = Field(None, description="Telefone do responsável")
-    alert_reason: str = Field(..., description="Motivo do alerta / Intenção (ex: Dúvida de Secretaria, Risco Elevado, Pedagógico)")
-    message_summary: str = Field(..., description="Resumo da mensagem ou texto do responsável")
-    unanswered_question: str | None = Field(None, description="Dúvida específica não respondida pela IA")
-    school_id: str | None = Field(None, description="UUID da escola")
+    target_role: str = "DIRETOR"
+    student_name: str | None = None
+    student_class: str | None = None
+    guardian_name: str | None = None
+    guardian_phone: str | None = None
+    alert_reason: str = "Atendimento Urgente / Direção"
+    message_summary: str = "[Mensagem do responsável]"
+    unanswered_question: str | None = None
+    school_id: str | None = None
 
 
 class StaffAlertResponse(BaseModel):
@@ -197,5 +196,41 @@ class GenerateReplyResponse(BaseModel):
     risk_level: str = "LOW"
 
 
+class ForwardCertificateRequest(BaseModel):
+    """Payload para encaminhamento de atestado ou declaração médica para a Secretaria Escolar."""
+    school_id: str | None = Field(
+        default="aac99735-32cb-4615-b2cb-0be315f18374",
+        description="UUID da escola no sistema"
+    )
+    student_name: str = Field(..., min_length=2, description="Nome do aluno")
+    student_class: str | None = Field(None, description="Turma do aluno (ex: 8º Ano B)")
+    guardian_name: str | None = Field(None, description="Nome do responsável")
+    guardian_phone: str | None = Field(None, description="Telefone do responsável")
+    sender_jid: str | None = Field(None, description="JID WhatsApp de quem enviou")
 
+    # Dados clínicos / Atestado
+    certificate_type: str = Field(
+        default="ATESTADO_MEDICO",
+        description="Tipo de documento: ATESTADO_MEDICO, DECLARACAO_COMPARECIMENTO, ATESTADO_ODONTOLOGICO, OUTRO"
+    )
+    days_off: str | int | None = Field(None, description="Dias ou período de afastamento (ex: '2 dias', '3')")
+    date_start: str | None = Field(None, description="Data de início do afastamento")
+    doctor_crm: str | None = Field(None, description="Nome do médico e/ou CRM se identificado")
+    certificate_summary: str = Field(..., min_length=3, description="Resumo do motivo ou descrição do atestado")
+
+    # Mídia opcional
+    media_url: str | None = Field(None, description="URL pública ou link da mídia do atestado")
+    media_base64: str | None = Field(None, description="Base64 do documento/imagem se disponível")
+    media_mimetype: str | None = Field(default="image/jpeg", description="MIME type da mídia")
+
+
+class ForwardCertificateResponse(BaseModel):
+    ok: bool = True
+    sent: bool
+    certificate_id: str | None = None
+    recipient_role: str = "Secretaria (Paula)"
+    recipient_phone: str
+    delivery_mode: str  # "media_caption" ou "text_summary"
+    provider_message_id: str | None = None
+    error: str | None = None
 
